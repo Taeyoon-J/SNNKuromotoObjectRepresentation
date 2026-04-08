@@ -1,0 +1,21 @@
+{
+  "experiment_dir": "outputs/smoke_composite_binding",
+  "checkpoint_path": "outputs/smoke_composite_binding/composite_binding.pt",
+  "test_accuracy": 0.0,
+  "final_train_loss": 1.2722790743175305,
+  "final_binding_loss": 0.9466556938071,
+  "final_train_accuracy": 0.0,
+  "composite_prediction": 1,
+  "object_names": [
+    "square",
+    "circle"
+  ],
+  "figure_paths": {
+    "prediction_figure": "outputs/smoke_composite_binding/predictions.png",
+    "activation_figure": "outputs/smoke_composite_binding/activation.png",
+    "loss_figure": "outputs/smoke_composite_binding/loss.png",
+    "dynamics_figure": "outputs/smoke_composite_binding/dynamics.png",
+    "composite_scene_figure": "outputs/smoke_composite_binding/composite_spike_sequence.png",
+    "binding_scores_figure": "outputs/smoke_composite_binding/binding_scores.png"
+  }
+}

@@ -87,21 +87,29 @@ class TopDownPathway(nn.Module):
         """
         Derive pairwise affinity and phase lag from the current spiking pattern.
 
-        The exact form can still be refined later, but this gives us a runnable
-        feedback mechanism now.
+        We separate two ideas here:
+        1. `affinity` should be large when two nodes behave similarly, because
+           similar activity should encourage synchronization.
+        2. `alpha` should reflect mismatch/cost, because larger disagreement can
+           be interpreted as a larger phase delay.
         """
         # Build all pairwise spike differences: [B, N, 1] vs [B, 1, N].
         spike_i = spikes.unsqueeze(2)
         spike_j = spikes.unsqueeze(1)
         delta = torch.abs(spike_i - spike_j)
 
-        # Larger spike mismatch produces stronger pairwise signal.
-        affinity = torch.log1p(delta)
-        # Normalize so values stay in a stable range across batches.
-        affinity = affinity / affinity.amax(dim=(1, 2), keepdim=True).clamp_min(1e-6)
+        # Normalize pairwise mismatch to [0, 1] so the feedback stays stable.
+        norm_delta = delta / delta.amax(dim=(1, 2), keepdim=True).clamp_min(1e-6)
 
-        # Convert affinity into a phase-lag term.
-        alpha = self.config.alpha_scale * (1.0 - affinity)
+        # Similar nodes receive stronger coupling; dissimilar nodes are down-weighted.
+        affinity = 1.0 - norm_delta
+
+        # Remove self-coupling from the feedback graph and keep the scale bounded.
+        eye = torch.eye(self.num_nodes, device=spikes.device).unsqueeze(0)
+        affinity = affinity * (1.0 - eye)
+
+        # Phase lag grows with mismatch rather than similarity.
+        alpha = self.config.alpha_scale * norm_delta
         return affinity, alpha
 
     def forward_step(
@@ -121,12 +129,13 @@ class TopDownPathway(nn.Module):
             gate_t: delayed sinusoidal gate used by the SNN
         """
         gamma_t = self.readout_gamma_function(encoded, theta_prev)
-        if theta_history:
-            # Use delayed phase history to build the gating signal.
-            delayed_idx = max(0, len(theta_history) - self.config.delay)
-            theta_delayed = theta_history[delayed_idx]
+
+        # Use an exact t-d style delay when enough history exists.
+        # Before that point, we fall back to the current state because a true
+        # delayed state is not available yet.
+        if self.config.delay > 0 and len(theta_history) >= self.config.delay:
+            theta_delayed = theta_history[-self.config.delay]
         else:
-            # At the first step there is no history yet, so fall back to the current state.
             theta_delayed = theta_prev
         gate_t = self.sinusoidal_gating_function(theta_delayed)
         theta_t = self.kuramoto(theta_prev, gamma_t, affinity, alpha)
@@ -196,14 +205,18 @@ class ObjectRepresentationSNN(nn.Module):
         affinity = torch.eye(self.num_nodes, device=device).unsqueeze(0).repeat(batch_size, 1, 1)
         alpha = torch.zeros(batch_size, self.num_nodes, self.num_nodes, device=device)
 
-        # These lists store the trajectory over time for later visualization/analysis.
+        # `theta_hist` is needed even without history return because delayed gating
+        # depends on previous oscillator states.
         theta_hist: List[torch.Tensor] = []
-        gamma_hist: List[torch.Tensor] = []
-        gate_hist: List[torch.Tensor] = []
-        membrane_hist: List[torch.Tensor] = []
+
+        # Only allocate the remaining history buffers when the caller explicitly
+        # asks for analysis outputs.
+        gamma_hist: Optional[List[torch.Tensor]] = [] if return_history else None
+        gate_hist: Optional[List[torch.Tensor]] = [] if return_history else None
+        membrane_hist: Optional[List[torch.Tensor]] = [] if return_history else None
         spike_hist: List[torch.Tensor] = []
-        affinity_hist: List[torch.Tensor] = []
-        alpha_hist: List[torch.Tensor] = []
+        affinity_hist: Optional[List[torch.Tensor]] = [] if return_history else None
+        alpha_hist: Optional[List[torch.Tensor]] = [] if return_history else None
 
         for _ in range(self.config.steps):
             # 1. Evolve the oscillator system and compute the gate.
@@ -224,22 +237,26 @@ class ObjectRepresentationSNN(nn.Module):
             # 4. Feed the current spiking pattern back into the oscillator coupling terms.
             affinity, alpha = self.top_down.top_down_feedback_function(spikes)
 
-            # Save the full state trajectory.
+            # Keep phase history for delayed gating.
             theta_hist.append(theta)
-            gamma_hist.append(gamma_t)
-            gate_hist.append(gate_t)
-            membrane_hist.append(membrane)
             spike_hist.append(spikes)
-            affinity_hist.append(affinity)
-            alpha_hist.append(alpha)
+
+            if return_history:
+                gamma_hist.append(gamma_t)
+                gate_hist.append(gate_t)
+                membrane_hist.append(membrane)
+                affinity_hist.append(affinity)
+                alpha_hist.append(alpha)
 
         # Stack spikes over time to obtain a [B, T, N] spike trace.
         spike_trace = torch.stack(spike_hist, dim=1)
         # Final classification based on pooled spike activity.
         logits = self.bottom_up.classify(spike_trace)
 
-        # History is optional in spirit, but we build it here so analysis code can
-        # inspect internal dynamics after a forward pass.
+        if not return_history:
+            return logits, {}
+
+        # Build the analysis dictionary only when requested.
         history: Dict[str, torch.Tensor] = {
             "encoded": encoded,
             "theta": torch.stack(theta_hist, dim=1),
@@ -250,4 +267,4 @@ class ObjectRepresentationSNN(nn.Module):
             "affinity": torch.stack(affinity_hist, dim=1),
             "alpha": torch.stack(alpha_hist, dim=1),
         }
-        return logits, history if return_history else {}
+        return logits, history

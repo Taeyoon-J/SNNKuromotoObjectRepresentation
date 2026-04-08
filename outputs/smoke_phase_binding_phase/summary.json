@@ -1,0 +1,10 @@
+{
+  "experiment_dir": "outputs/smoke_phase_binding_phase",
+  "checkpoint_path": "outputs/smoke_phase_binding_phase/phase_binding.pt",
+  "final_train_loss": 3.1944692730903625,
+  "last_train_intra_sync": 0.3987080156803131,
+  "last_train_inter_sync": 0.8502283692359924,
+  "test_loss": 3.4599761962890625,
+  "mean_test_intra_sync": 0.6429016590118408,
+  "mean_test_inter_sync": 0.9173954427242279
+}

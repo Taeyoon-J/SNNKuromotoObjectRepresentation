@@ -1,0 +1,10 @@
+{
+  "experiment_dir": "outputs/phase_binding_long_phase",
+  "checkpoint_path": "outputs/phase_binding_long_phase/phase_binding.pt",
+  "final_train_loss": 0.5871607452630997,
+  "last_train_intra_sync": 0.93492591381073,
+  "last_train_inter_sync": 0.00074043869972229,
+  "test_loss": 0.5981699426968893,
+  "mean_test_intra_sync": 0.9116525252660116,
+  "mean_test_inter_sync": 0.0009841422239939372
+}

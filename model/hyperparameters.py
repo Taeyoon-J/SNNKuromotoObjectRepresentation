@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -58,10 +59,6 @@ class ObjectRepresentationConfig:
     # Noise used when generating synthetic object images.
     noise_std: float = 0.01
 
-    # Hidden dimension is reserved for future extensions and helps keep the config
-    # similar in spirit to the TINGTING code organization.
-    hidden_dim: int = 16
-
     # Standard training hyperparameters.
     batch_size: int = 16
     epochs: int = 20
@@ -71,14 +68,36 @@ class ObjectRepresentationConfig:
 
     # Number of synthetic samples to generate for toy experiments.
     num_samples: int = 100
+    composite_num_samples: int = 120
+    composite_patch_size: int = 6
+
+    # Loss weights for the composite temporal-binding training mode.
+    classification_loss_weight: float = 0.0
+    binding_loss_weight: float = 1.0
+    oscillation_loss_weight: float = 1.0
+    competition_loss_weight: float = 0.5
+    outside_loss_weight: float = 0.25
+    sparsity_loss_weight: float = 0.05
+    oscillation_period: int = 6
+    spike_logit_scale: float = 40.0
+    gate_logit_scale: float = 8.0
+    phase_logit_scale: float = 8.0
 
     # Default execution device.
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    output_dir: str = "outputs"
+    experiment_name: str = "composite_binding"
+    checkpoint_name: str = "composite_binding.pt"
 
     @property
     def num_nodes(self) -> int:
         """Total number of spatial positions once an image is flattened."""
         return self.image_height * self.image_width
+
+    @property
+    def experiment_dir(self) -> Path:
+        """Directory where training artifacts for this run should be stored."""
+        return Path(self.output_dir) / self.experiment_name
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -103,14 +122,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--alpha_scale", type=float, default=1.0)
     parser.add_argument("--delay", type=int, default=2)
     parser.add_argument("--noise_std", type=float, default=0.01)
-    parser.add_argument("--hidden_dim", type=int, default=16)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--num_samples", type=int, default=100)
+    parser.add_argument("--composite_num_samples", type=int, default=120)
+    parser.add_argument("--composite_patch_size", type=int, default=6)
+    parser.add_argument("--classification_loss_weight", type=float, default=0.0)
+    parser.add_argument("--binding_loss_weight", type=float, default=1.0)
+    parser.add_argument("--oscillation_loss_weight", type=float, default=1.0)
+    parser.add_argument("--competition_loss_weight", type=float, default=0.5)
+    parser.add_argument("--outside_loss_weight", type=float, default=0.25)
+    parser.add_argument("--sparsity_loss_weight", type=float, default=0.05)
+    parser.add_argument("--oscillation_period", type=int, default=6)
+    parser.add_argument("--spike_logit_scale", type=float, default=40.0)
+    parser.add_argument("--gate_logit_scale", type=float, default=8.0)
+    parser.add_argument("--phase_logit_scale", type=float, default=8.0)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--output_dir", type=str, default="outputs")
+    parser.add_argument("--experiment_name", type=str, default="composite_binding")
+    parser.add_argument("--checkpoint_name", type=str, default="composite_binding.pt")
     return parser
 
 
