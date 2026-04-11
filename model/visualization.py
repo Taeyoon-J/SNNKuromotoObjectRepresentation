@@ -6,6 +6,8 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Tuple
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -83,6 +85,37 @@ def visualize_dynamics(history: Dict[str, torch.Tensor], sample_idx: int = 0):
         ax.set_title(title)
         ax.set_xlabel("Time Step")
         ax.grid(alpha=0.25)
+
+    fig.tight_layout()
+    return fig
+
+
+def visualize_binding_metrics(
+    intra_sync: torch.Tensor,
+    inter_sync: torch.Tensor,
+    object_names: List[str],
+):
+    """Plot Kuramoto binding metrics over time."""
+    steps = intra_sync.shape[1]
+    time_axis = np.arange(1, steps + 1)
+    fig, axes = plt.subplots(1, 2, figsize=(11, 3.6))
+
+    for obj_idx in range(intra_sync.shape[0]):
+        label = object_names[obj_idx] if obj_idx < len(object_names) else f"object_{obj_idx}"
+        axes[0].plot(time_axis, intra_sync[obj_idx].detach().cpu().numpy(), linewidth=2, label=label)
+    axes[0].set_title("Intra-Object Synchrony")
+    axes[0].set_xlabel("Time Step")
+    axes[0].set_ylabel("order parameter")
+    axes[0].set_ylim(0.0, 1.05)
+    axes[0].grid(alpha=0.25)
+    axes[0].legend()
+
+    axes[1].plot(time_axis, inter_sync.detach().cpu().numpy(), linewidth=2, color="black")
+    axes[1].set_title("Inter-Object Synchrony")
+    axes[1].set_xlabel("Time Step")
+    axes[1].set_ylabel("phase similarity")
+    axes[1].set_ylim(0.0, 1.05)
+    axes[1].grid(alpha=0.25)
 
     fig.tight_layout()
     return fig

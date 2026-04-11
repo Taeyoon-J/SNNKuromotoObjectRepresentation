@@ -16,7 +16,14 @@ class VectorKuramoto(nn.Module):
     phase-lag matrix `alpha_t`.
     """
 
-    def __init__(self, num_nodes: int, osc_dim: int = 4, coupling: float = 1.0, dt: float = 1.0) -> None:
+    def __init__(
+        self,
+        num_nodes: int,
+        osc_dim: int = 4,
+        coupling: float = 1.0,
+        dt: float = 1.0,
+        attraction_strength: float = 1.0,
+    ) -> None:
         super().__init__()
         # Number of flattened spatial locations, e.g. H * W.
         self.num_nodes = num_nodes
@@ -26,18 +33,13 @@ class VectorKuramoto(nn.Module):
         self.coupling = coupling
         # Euler integration step size.
         self.dt = dt
-
-        # Natural frequency for each node and oscillator dimension.
-        self.omega = nn.Parameter(torch.zeros(num_nodes, osc_dim))
-        # How strongly each node follows the external drive gamma.
-        self.kappa = nn.Parameter(torch.ones(num_nodes, osc_dim))
-        # Additional learned phase offset between node pairs.
-        self.alpha_bias = nn.Parameter(torch.zeros(num_nodes, num_nodes))
+        # Shared attraction strength k_i toward the previous encoder drive.
+        self.attraction_strength = attraction_strength
 
     def forward(
         self,
         theta_prev: torch.Tensor,
-        gamma_t: torch.Tensor,
+        gamma_prev: torch.Tensor,
         affinity: torch.Tensor,
         alpha_t: torch.Tensor,
     ) -> torch.Tensor:
@@ -46,7 +48,7 @@ class VectorKuramoto(nn.Module):
 
         Shapes:
             theta_prev: [B, N, D]
-            gamma_t:    [B, N, D]
+            gamma_prev: [B, N, D]
             affinity:   [B, N, N]
             alpha_t:    [B, N, N]
         """
@@ -57,24 +59,20 @@ class VectorKuramoto(nn.Module):
         theta_i = theta_prev.unsqueeze(2)
         theta_j = theta_prev.unsqueeze(1)
 
-        # Combine the dynamic phase lag coming from feedback with the static,
-        # learnable phase bias.
-        alpha_total = alpha_t + self.alpha_bias.unsqueeze(0)
-
         # Sakaguchi-Kuramoto style interaction:
         # sin(theta_j - theta_i - alpha_ij)
-        phase_term = torch.sin(theta_j - theta_i - alpha_total.unsqueeze(-1))
+        phase_term = torch.sin(theta_j - theta_i - alpha_t.unsqueeze(-1))
 
         # Sum incoming influences from all other nodes.
         coupling_term = (self.coupling / float(n)) * torch.sum(
             affinity.unsqueeze(-1) * phase_term, dim=2
         )
 
-        # External sensory/control drive pushes the oscillator toward gamma_t.
-        drive_term = self.kappa.unsqueeze(0) * (gamma_t - theta_prev)
+        # External sensory/control drive pushes the oscillator toward gamma(t-1).
+        drive_term = self.attraction_strength * (gamma_prev - theta_prev)
 
         # Total time derivative of the oscillator state.
-        theta_dot = self.omega.unsqueeze(0) + drive_term + coupling_term
+        theta_dot = drive_term + coupling_term
 
         # Euler update.
         return theta_prev + self.dt * theta_dot
@@ -89,20 +87,28 @@ class GraphVectorKuramoto(nn.Module):
     without changing the outer model code.
     """
 
-    def __init__(self, num_nodes: int, osc_dim: int = 4, coupling: float = 1.0, dt: float = 1.0) -> None:
+    def __init__(
+        self,
+        num_nodes: int,
+        osc_dim: int = 4,
+        coupling: float = 1.0,
+        dt: float = 1.0,
+        attraction_strength: float = 1.0,
+    ) -> None:
         super().__init__()
         self.core = VectorKuramoto(
             num_nodes=num_nodes,
             osc_dim=osc_dim,
             coupling=coupling,
             dt=dt,
+            attraction_strength=attraction_strength,
         )
 
     def forward(
         self,
         theta_prev: torch.Tensor,
-        gamma_t: torch.Tensor,
+        gamma_prev: torch.Tensor,
         affinity: torch.Tensor,
         alpha_t: torch.Tensor,
     ) -> torch.Tensor:
-        return self.core(theta_prev, gamma_t, affinity, alpha_t)
+        return self.core(theta_prev, gamma_prev, affinity, alpha_t)

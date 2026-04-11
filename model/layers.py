@@ -17,24 +17,25 @@ except ImportError:
 class GraphVectorKuramotoLayer(nn.Module):
     """Small wrapper module around the graph-aware Kuramoto dynamics."""
 
-    def __init__(self, num_nodes: int, osc_dim: int, coupling: float, dt: float) -> None:
+    def __init__(self, num_nodes: int, osc_dim: int, coupling: float, dt: float, attraction_strength: float) -> None:
         super().__init__()
         self.kuramoto = GraphVectorKuramoto(
             num_nodes=num_nodes,
             osc_dim=osc_dim,
             coupling=coupling,
             dt=dt,
+            attraction_strength=attraction_strength,
         )
 
     def forward(
         self,
         theta_prev: torch.Tensor,
-        gamma_t: torch.Tensor,
+        gamma_prev: torch.Tensor,
         affinity: torch.Tensor,
         alpha_t: torch.Tensor,
     ) -> torch.Tensor:
         # Delegate the actual oscillator update to the Kuramoto layer.
-        return self.kuramoto(theta_prev, gamma_t, affinity, alpha_t)
+        return self.kuramoto(theta_prev, gamma_prev, affinity, alpha_t)
 
 
 class ObjectReadoutSNN(nn.Module):
@@ -52,14 +53,12 @@ class ObjectReadoutSNN(nn.Module):
         num_classes: int,
         membrane_decay: float,
         threshold: float,
-        reset_scale: float,
     ) -> None:
         super().__init__()
         # Keep these values as attributes so the update rule is easy to inspect.
         self.num_nodes = num_nodes
         self.membrane_decay = membrane_decay
         self.threshold = threshold
-        self.reset_scale = reset_scale
 
         # Projects oscillator features into a scalar current for each node.
         self.input_weight = nn.Linear(osc_dim, 1)
@@ -90,12 +89,12 @@ class ObjectReadoutSNN(nn.Module):
         # Add recurrent contributions from previous spikes.
         recurrent_drive = spikes_prev @ self.recurrent_weight
 
-        # Standard leaky-integrator style membrane update with spike reset.
+        # Standard leaky-integrator style membrane update with threshold-sized reset.
         membrane = (
             self.membrane_decay * membrane_prev
             + synaptic_drive
             + recurrent_drive
-            - self.reset_scale * self.threshold * spikes_prev
+            - self.threshold * spikes_prev
         )
 
         # Use a smooth surrogate spike function so the model stays trainable.

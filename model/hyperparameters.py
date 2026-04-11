@@ -28,8 +28,9 @@ class ObjectRepresentationConfig:
     image_width: int = 16
     input_channels: int = 3
 
-    # Oscillator representation size per spatial location.
-    # Each image pixel/location is mapped to an oscillator vector of length `osc_dim`.
+    # Oscillator representation size per oscillator node.
+    # We interpret each pixel-channel entry as one oscillator node, and each node
+    # carries a vector state of length `osc_dim`.
     osc_dim: int = 4
 
     # Classification target size for the synthetic objects.
@@ -37,19 +38,23 @@ class ObjectRepresentationConfig:
 
     # Number of recurrent time steps to unroll the oscillator-SNN system.
     steps: int = 12
+    # Update gamma and the SNN only every `readout_update_interval` theta steps.
+    readout_update_interval: int = 5
 
     # Euler integration step size for the Kuramoto dynamics.
     dt: float = 0.15
 
     # Global coupling strength between oscillators.
     coupling: float = 1.0
+    # Attraction strength k_i toward the encoder/readout drive gamma.
+    # In the current simplified implementation we use one shared scalar value.
+    attraction_strength: float = 1.0
 
     # Membrane potential carry-over in the SNN update.
     membrane_decay: float = 0.92
 
-    # Spike threshold and reset strength for the spiking layer.
+    # Spike threshold for the spiking layer.
     threshold: float = 0.6
-    reset_scale: float = 0.6
 
     # Scale for phase-lag feedback and delay used in the sinusoidal gate.
     alpha_scale: float = 1.0
@@ -77,8 +82,8 @@ class ObjectRepresentationConfig:
 
     @property
     def num_nodes(self) -> int:
-        """Total number of spatial positions once an image is flattened."""
-        return self.image_height * self.image_width
+        """Total number of oscillator nodes once H, W, and C are flattened together."""
+        return self.image_height * self.image_width * self.input_channels
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -95,11 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--osc_dim", type=int, default=4)
     parser.add_argument("--num_classes", type=int, default=5)
     parser.add_argument("--steps", type=int, default=12)
+    parser.add_argument("--readout_update_interval", type=int, default=5)
     parser.add_argument("--dt", type=float, default=0.15)
     parser.add_argument("--coupling", type=float, default=1.0)
+    parser.add_argument("--attraction_strength", type=float, default=1.0)
     parser.add_argument("--membrane_decay", type=float, default=0.92)
     parser.add_argument("--threshold", type=float, default=0.6)
-    parser.add_argument("--reset_scale", type=float, default=0.6)
     parser.add_argument("--alpha_scale", type=float, default=1.0)
     parser.add_argument("--delay", type=int, default=2)
     parser.add_argument("--noise_std", type=float, default=0.01)

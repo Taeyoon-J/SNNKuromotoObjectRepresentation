@@ -13,21 +13,23 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 try:
-    from .data import PredefinedObjectDataset
+    from .data import PredefinedObjectDataset, build_composite_masks, build_composite_scene
     from .hyperparameters import ObjectRepresentationConfig, get_default_config
     from .s2net import ObjectRepresentationSNN
     from .visualization import (
         plot_activation_function,
+        visualize_binding_metrics,
         plot_loss_curve,
         visualize_dynamics,
         visualize_objects,
     )
 except ImportError:
-    from data import PredefinedObjectDataset
+    from data import PredefinedObjectDataset, build_composite_masks, build_composite_scene
     from hyperparameters import ObjectRepresentationConfig, get_default_config
     from s2net import ObjectRepresentationSNN
     from visualization import (
         plot_activation_function,
+        visualize_binding_metrics,
         plot_loss_curve,
         visualize_dynamics,
         visualize_objects,
@@ -190,13 +192,89 @@ def run_synthetic_analysis(
     return result
 
 
+@torch.no_grad()
+def run_kuramoto_binding_test(
+    config: Optional[ObjectRepresentationConfig] = None,
+    object_specs=((0, 1, 1), (3, 8, 8)),
+    patch_size: int = 6,
+) -> Dict[str, object]:
+    """
+    Measure whether Kuramoto states synchronize within objects and separate across objects.
+
+    This test uses a single composite scene and evaluates only the oscillator-side
+    binding dynamics, not downstream classification quality.
+    """
+    cfg = config or get_default_config()
+    model = ObjectRepresentationSNN(cfg).to(cfg.device)
+    model.eval()
+
+    scene = build_composite_scene(
+        image_size=cfg.image_height,
+        object_specs=object_specs,
+        patch_size=patch_size,
+    )
+    object_masks, object_names = build_composite_masks(
+        image_size=cfg.image_height,
+        object_specs=object_specs,
+        patch_size=patch_size,
+    )
+
+    logits, history = model(scene.unsqueeze(0).to(cfg.device), return_history=True)
+    theta_history = history["theta"][0].detach().cpu()
+    steps = theta_history.shape[0]
+
+    # Collapse the vector oscillator dimension to one scalar phase per node.
+    phase_history = theta_history.mean(dim=-1)
+
+    # Flatten HWC-style node layout back to per-pixel masks, then expand each mask
+    # across channels because each pixel-channel entry is its own oscillator node.
+    flat_pixel_masks = object_masks.view(object_masks.shape[0], -1)
+    channel_masks = flat_pixel_masks.repeat_interleave(cfg.input_channels, dim=1)
+
+    intra_sync_values = []
+    mean_phase_vectors = []
+    for mask in channel_masks:
+        active = mask > 0.5
+        object_phases = phase_history[:, active]
+        phase_vector = torch.exp(1j * object_phases)
+        mean_vector = phase_vector.mean(dim=1)
+        intra_sync_values.append(torch.abs(mean_vector))
+        mean_phase_vectors.append(mean_vector)
+
+    intra_sync = torch.stack(intra_sync_values, dim=0)
+
+    if len(mean_phase_vectors) >= 2:
+        phase_diff = torch.angle(mean_phase_vectors[0]) - torch.angle(mean_phase_vectors[1])
+        inter_sync = 0.5 * (1.0 + torch.cos(phase_diff))
+    else:
+        inter_sync = torch.ones(steps)
+
+    figure = visualize_binding_metrics(intra_sync, inter_sync, object_names)
+
+    return {
+        "scene": scene,
+        "object_masks": object_masks,
+        "object_names": object_names,
+        "prediction": logits.argmax(dim=1).cpu(),
+        "history": {key: value.cpu() for key, value in history.items()},
+        "intra_sync": intra_sync,
+        "inter_sync": inter_sync,
+        "mean_intra_sync": intra_sync.mean(dim=1),
+        "mean_inter_sync": inter_sync.mean(),
+        "binding_figure": figure,
+    }
+
+
 if __name__ == "__main__":
     # Running this file directly triggers a tiny end-to-end smoke test.
     analysis = run_synthetic_analysis(create_plots=False)
+    binding = run_kuramoto_binding_test(config=get_default_config())
     print(
         {
             "final_train_loss": round(analysis["train_losses"][-1], 4),
             "final_train_accuracy": round(analysis["train_accuracies"][-1], 4),
             "test_accuracy": round(analysis["test_accuracy"], 4),
+            "mean_intra_sync": [round(float(x), 4) for x in binding["mean_intra_sync"]],
+            "mean_inter_sync": round(float(binding["mean_inter_sync"]), 4),
         }
     )

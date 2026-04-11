@@ -4,7 +4,7 @@ from __future__ import annotations
 # It is intentionally simple so the model can be tested without an external
 # dataset pipeline.
 
-from typing import Tuple
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -58,6 +58,87 @@ def colorize_pattern(mask: np.ndarray, object_id: int) -> np.ndarray:
     image += 0.05
     image[mask > 0.0] = color
     return image
+
+
+def paste_pattern_on_canvas(
+    canvas: np.ndarray,
+    pattern_image: np.ndarray,
+    top: int,
+    left: int,
+) -> np.ndarray:
+    """Paste a smaller RGB pattern image onto a larger canvas."""
+    patch_h, patch_w, _ = pattern_image.shape
+    bottom = min(top + patch_h, canvas.shape[0])
+    right = min(left + patch_w, canvas.shape[1])
+
+    valid_h = max(0, bottom - top)
+    valid_w = max(0, right - left)
+    if valid_h == 0 or valid_w == 0:
+        return canvas
+
+    patch = pattern_image[:valid_h, :valid_w]
+    object_mask = np.any(patch > 0.06, axis=-1, keepdims=True)
+    canvas[top:bottom, left:right] = np.where(object_mask, patch, canvas[top:bottom, left:right])
+    return canvas
+
+
+def build_composite_scene(
+    image_size: int = 16,
+    object_specs: Tuple[Tuple[int, int, int], ...] = ((0, 1, 1), (3, 8, 8)),
+    patch_size: int = 6,
+    background_value: float = 0.05,
+) -> torch.Tensor:
+    """
+    Build one scene that contains multiple predefined objects at chosen locations.
+
+    `object_specs` is a tuple of `(object_id, top, left)` entries.
+    """
+    canvas = np.full((image_size, image_size, 3), background_value, dtype=np.float32)
+
+    for object_id, top, left in object_specs:
+        mask = make_object_pattern(object_id, patch_size)
+        patch = colorize_pattern(mask, object_id)
+        canvas = paste_pattern_on_canvas(canvas, patch, top=top, left=left)
+
+    return torch.from_numpy(np.clip(canvas, 0.0, 1.0)).float()
+
+
+def build_composite_masks(
+    image_size: int = 16,
+    object_specs: Tuple[Tuple[int, int, int], ...] = ((0, 1, 1), (3, 8, 8)),
+    patch_size: int = 6,
+) -> Tuple[torch.Tensor, List[str]]:
+    """
+    Reconstruct one binary mask per object in a composite scene.
+
+    Returns:
+        masks: [num_objects, H, W]
+        names: readable names for legends/titles
+    """
+    masks = []
+    names = []
+    object_names = {
+        0: "square",
+        1: "cross",
+        2: "diagonal",
+        3: "circle",
+        4: "checker",
+    }
+
+    for object_id, top, left in object_specs:
+        full_mask = np.zeros((image_size, image_size), dtype=np.float32)
+        patch_mask = make_object_pattern(object_id, patch_size)
+        patch_h, patch_w = patch_mask.shape
+        bottom = min(top + patch_h, image_size)
+        right = min(left + patch_w, image_size)
+        valid_h = max(0, bottom - top)
+        valid_w = max(0, right - left)
+        if valid_h > 0 and valid_w > 0:
+            full_mask[top:bottom, left:right] = patch_mask[:valid_h, :valid_w]
+        masks.append(full_mask)
+        names.append(object_names.get(object_id, f"object_{object_id}"))
+
+    return torch.from_numpy(np.stack(masks, axis=0)).float(), names
 
 
 def sample_predefined_objects(
