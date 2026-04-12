@@ -86,7 +86,9 @@ class TopDownPathway(nn.Module):
         encoding used to initialize oscillators.
         """
         theta_proj = self.gamma_readout(theta_state)
-        return self.activation_function(torch.abs(theta_proj) * self.gamma_gain)
+        return self.activation_function(torch.abs(theta_proj * self.gamma_gain))
+        # return self.activation_function(torch.abs(theta_proj) * self.gamma_gain)
+    
 
     def sinusoidal_gating_function(self, theta_delayed: torch.Tensor) -> torch.Tensor:
         """
@@ -163,6 +165,8 @@ class ObjectRepresentationSNN(nn.Module):
             num_classes=self.config.num_classes,
             membrane_decay=self.config.membrane_decay,
             threshold=self.config.threshold,
+            recurrent_scale=self.config.recurrent_scale,
+            classifier_start_step=self.config.classifier_start_step,
         )
 
     def loss_function(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:

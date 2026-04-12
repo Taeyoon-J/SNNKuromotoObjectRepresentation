@@ -119,3 +119,74 @@ def visualize_binding_metrics(
 
     fig.tight_layout()
     return fig
+
+
+def visualize_scheduled_kuramoto_readout(
+    input_image: torch.Tensor,
+    gamma0: torch.Tensor,
+    history: Dict[str, torch.Tensor],
+    image_height: int,
+    image_width: int,
+    input_channels: int,
+    steps_to_show: List[int],
+):
+    """
+    Show Kuramoto phase maps together with gamma and spike maps at scheduled steps.
+
+    `steps_to_show` uses 1-based model time indices, e.g. [20, 40].
+    The Kuramoto row visualizes mean sin(theta), which is easier to interpret
+    than raw vector-valued theta.
+    """
+
+    def node_vector_to_rgb_like(values: torch.Tensor) -> np.ndarray:
+        image = values.mean(dim=-1).view(image_height, image_width, input_channels).detach().cpu()
+        vmin = float(image.min())
+        vmax = float(image.max())
+        return ((image - vmin) / max(vmax - vmin, 1e-6)).numpy()
+
+    def theta_to_phase_map(theta: torch.Tensor) -> np.ndarray:
+        phase = torch.sin(theta).mean(dim=-1)
+        phase = phase.view(image_height, image_width, input_channels).mean(dim=-1).detach().cpu()
+        max_abs = float(phase.abs().max())
+        return (phase / max(max_abs, 1e-6)).numpy()
+
+    def spike_to_map(spikes: torch.Tensor) -> np.ndarray:
+        image = spikes.view(image_height, image_width, input_channels).mean(dim=-1).detach().cpu()
+        vmin = float(image.min())
+        vmax = float(image.max())
+        return ((image - vmin) / max(vmax - vmin, 1e-6)).numpy()
+
+    cols = len(steps_to_show) + 2
+    fig, axes = plt.subplots(3, cols, figsize=(2.8 * cols, 8.0))
+    axes = np.atleast_2d(axes)
+
+    axes[0, 0].imshow(input_image.detach().cpu().numpy())
+    axes[0, 0].set_title("Input")
+    axes[0, 0].axis("off")
+    axes[1, 0].axis("off")
+    axes[2, 0].axis("off")
+
+    axes[0, 1].imshow(node_vector_to_rgb_like(gamma0))
+    axes[0, 1].set_title("gamma(0)")
+    axes[0, 1].axis("off")
+    axes[1, 1].axis("off")
+    axes[2, 1].axis("off")
+
+    for col_idx, step in enumerate(steps_to_show, start=2):
+        hist_idx = step - 1
+
+        axes[0, col_idx].imshow(theta_to_phase_map(history["theta"][0, hist_idx]), cmap="coolwarm", vmin=-1.0, vmax=1.0)
+        axes[0, col_idx].set_title(f"sin theta({step})")
+        axes[0, col_idx].axis("off")
+
+        axes[1, col_idx].imshow(node_vector_to_rgb_like(history["gamma"][0, hist_idx]))
+        axes[1, col_idx].set_title(f"gamma({step})")
+        axes[1, col_idx].axis("off")
+
+        axes[2, col_idx].imshow(spike_to_map(history["spikes"][0, hist_idx]), cmap="hot", vmin=0.0, vmax=1.0)
+        axes[2, col_idx].set_title(f"spike({step})")
+        axes[2, col_idx].axis("off")
+
+    fig.suptitle("Scheduled Kuramoto -> Gamma -> Spike", y=1.02)
+    fig.tight_layout()
+    return fig

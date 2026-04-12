@@ -53,12 +53,16 @@ class ObjectReadoutSNN(nn.Module):
         num_classes: int,
         membrane_decay: float,
         threshold: float,
+        recurrent_scale: float,
+        classifier_start_step: int,
     ) -> None:
         super().__init__()
         # Keep these values as attributes so the update rule is easy to inspect.
         self.num_nodes = num_nodes
         self.membrane_decay = membrane_decay
         self.threshold = threshold
+        self.recurrent_scale = recurrent_scale
+        self.classifier_start_step = classifier_start_step
 
         # Projects oscillator features into a scalar current for each node.
         self.input_weight = nn.Linear(osc_dim, 1)
@@ -87,7 +91,7 @@ class ObjectReadoutSNN(nn.Module):
         # Convert oscillator features into scalar synaptic current per node.
         synaptic_drive = self.input_weight(modulated_gamma).squeeze(-1)
         # Add recurrent contributions from previous spikes.
-        recurrent_drive = spikes_prev @ self.recurrent_weight
+        recurrent_drive = self.recurrent_scale * (spikes_prev @ self.recurrent_weight)
 
         # Standard leaky-integrator style membrane update with threshold-sized reset.
         membrane = (
@@ -103,9 +107,12 @@ class ObjectReadoutSNN(nn.Module):
 
     def classify(self, spike_trace: torch.Tensor) -> torch.Tensor:
         """
-        Pool spike activity across time and map it to class logits.
+        Pool spike activity from the configured late time window and map it to class logits.
 
         `spike_trace` has shape [B, T, N].
         """
-        pooled = spike_trace.mean(dim=1)
+        # Convert the human-facing time step t=60 into zero-based index 59.
+        # If the run is shorter than that, fall back to the final available step.
+        start_idx = min(max(self.classifier_start_step - 1, 0), spike_trace.shape[1] - 1)
+        pooled = spike_trace[:, start_idx:, :].mean(dim=1)
         return self.classifier(pooled)
