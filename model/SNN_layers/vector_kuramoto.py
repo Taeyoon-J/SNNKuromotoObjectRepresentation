@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from typing import Optional
 
 
 class VectorKuramoto(nn.Module):
@@ -23,6 +24,12 @@ class VectorKuramoto(nn.Module):
         coupling: float = 1.0,
         dt: float = 1.0,
         attraction_strength: float = 1.0,
+        feedback_affinity_scale: float = 0.25,
+        feedback_alpha_scale: float = 0.25,
+        alpha_scale: float = 1.0,
+        coupling_chunk_size: int = 256,
+        input_channels: int = 3,
+        channel_wise_coupling: bool = True,
     ) -> None:
         super().__init__()
         # Number of flattened spatial locations, e.g. H * W.
@@ -35,13 +42,97 @@ class VectorKuramoto(nn.Module):
         self.dt = dt
         # Shared attraction strength k_i toward the previous encoder drive.
         self.attraction_strength = attraction_strength
+        # Feedback scales used when pairwise terms are generated from spikes.
+        self.feedback_affinity_scale = feedback_affinity_scale
+        self.feedback_alpha_scale = feedback_alpha_scale
+        self.alpha_scale = alpha_scale
+        self.coupling_chunk_size = coupling_chunk_size
+        self.input_channels = input_channels
+        self.channel_wise_coupling = channel_wise_coupling
+
+    def _feedback_pairwise_coupling(self, theta_prev: torch.Tensor, feedback_spikes: torch.Tensor) -> torch.Tensor:
+        """
+        Compute pairwise coupling in receiver-node chunks.
+
+        This avoids materializing [B, N, N, D], which is too large for 64x64x3
+        inputs. `feedback_spikes` has shape [B, N] and defines the same
+        relationship as the previous top-down feedback:
+            affinity_ij = scale * (1 - normalized |S_i - S_j|)
+            alpha_ij = scale * alpha_scale * normalized |S_i - S_j|
+        """
+        batch_size, n, _ = theta_prev.shape
+        chunk_size = max(1, int(self.coupling_chunk_size))
+
+        spike_range = (feedback_spikes.amax(dim=1, keepdim=True) - feedback_spikes.amin(dim=1, keepdim=True)).clamp_min(1e-6)
+        theta_j = theta_prev.unsqueeze(1)
+        spike_j = feedback_spikes.unsqueeze(1)
+
+        chunks = []
+        for start in range(0, n, chunk_size):
+            end = min(start + chunk_size, n)
+            theta_i = theta_prev[:, start:end].unsqueeze(2)
+            spike_i = feedback_spikes[:, start:end].unsqueeze(2)
+            normalized_delta = torch.abs(spike_i - spike_j) / spike_range.unsqueeze(-1)
+            affinity = self.feedback_affinity_scale * (1.0 - normalized_delta)
+            alpha = self.feedback_alpha_scale * self.alpha_scale * normalized_delta
+            phase_term = torch.sin(theta_j - theta_i - alpha.unsqueeze(-1))
+            chunk = (self.coupling / float(n)) * torch.sum(affinity.unsqueeze(-1) * phase_term, dim=2)
+            chunks.append(chunk)
+
+        return torch.cat(chunks, dim=1)
+
+    def _channel_wise_feedback_pairwise_coupling(
+        self,
+        theta_prev: torch.Tensor,
+        feedback_spikes: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute feedback coupling separately inside each input channel.
+
+        The model flattens images in HWC order, so channel c occupies nodes
+        c, c + C, c + 2C, ... . This method lets red couple only with red,
+        green only with green, and blue only with blue.
+        """
+        if self.input_channels <= 1 or theta_prev.shape[1] % self.input_channels != 0:
+            return self._feedback_pairwise_coupling(theta_prev, feedback_spikes)
+
+        coupling_term = torch.zeros_like(theta_prev)
+        for channel_idx in range(self.input_channels):
+            node_slice = slice(channel_idx, None, self.input_channels)
+            channel_theta = theta_prev[:, node_slice, :]
+            channel_spikes = feedback_spikes[:, node_slice]
+            coupling_term[:, node_slice, :] = self._feedback_pairwise_coupling(channel_theta, channel_spikes)
+        return coupling_term
+
+    def _matrix_pairwise_coupling(
+        self,
+        theta_prev: torch.Tensor,
+        affinity: Optional[torch.Tensor],
+        alpha_t: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Fallback chunked coupling for callers that still pass full matrices."""
+        _, n, _ = theta_prev.shape
+        chunk_size = max(1, int(self.coupling_chunk_size))
+        theta_j = theta_prev.unsqueeze(1)
+
+        chunks = []
+        for start in range(0, n, chunk_size):
+            end = min(start + chunk_size, n)
+            theta_i = theta_prev[:, start:end].unsqueeze(2)
+            affinity_chunk = affinity[:, start:end]
+            alpha_chunk = alpha_t[:, start:end]
+            phase_term = torch.sin(theta_j - theta_i - alpha_chunk.unsqueeze(-1))
+            chunk = (self.coupling / float(n)) * torch.sum(affinity_chunk.unsqueeze(-1) * phase_term, dim=2)
+            chunks.append(chunk)
+
+        return torch.cat(chunks, dim=1)
 
     def forward(
         self,
         theta_prev: torch.Tensor,
         gamma_prev: torch.Tensor,
-        affinity: torch.Tensor,
-        alpha_t: torch.Tensor,
+        affinity: Optional[torch.Tensor],
+        alpha_t: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """
         Advance the vector Kuramoto system by one step.
@@ -49,24 +140,20 @@ class VectorKuramoto(nn.Module):
         Shapes:
             theta_prev: [B, N, D]
             gamma_prev: [B, N, D]
-            affinity:   [B, N, N]
-            alpha_t:    [B, N, N]
+            affinity:   None, [B, N] feedback spikes, or [B, N, N]
+            alpha_t:    None or [B, N, N]
         """
-        _, n, _ = theta_prev.shape
-
-        # `theta_i` and `theta_j` are reshaped so broadcasting can form every
-        # pairwise phase difference between nodes i and j.
-        theta_i = theta_prev.unsqueeze(2)
-        theta_j = theta_prev.unsqueeze(1)
-
-        # Sakaguchi-Kuramoto style interaction:
-        # sin(theta_j - theta_i - alpha_ij)
-        phase_term = torch.sin(theta_j - theta_i - alpha_t.unsqueeze(-1))
-
-        # Sum incoming influences from all other nodes.
-        coupling_term = (self.coupling / float(n)) * torch.sum(
-            affinity.unsqueeze(-1) * phase_term, dim=2
-        )
+        if affinity is None:
+            coupling_term = torch.zeros_like(theta_prev)
+        elif affinity.dim() == 2:
+            if self.channel_wise_coupling:
+                coupling_term = self._channel_wise_feedback_pairwise_coupling(theta_prev, affinity)
+            else:
+                coupling_term = self._feedback_pairwise_coupling(theta_prev, affinity)
+        elif affinity.dim() == 3 and alpha_t is not None:
+            coupling_term = self._matrix_pairwise_coupling(theta_prev, affinity, alpha_t)
+        else:
+            raise ValueError("affinity must be None, [B, N] feedback spikes, or [B, N, N] with alpha_t")
 
         # External sensory/control drive pushes the oscillator toward gamma(t-1).
         drive_term = self.attraction_strength * (gamma_prev - theta_prev)
@@ -94,6 +181,12 @@ class GraphVectorKuramoto(nn.Module):
         coupling: float = 1.0,
         dt: float = 1.0,
         attraction_strength: float = 1.0,
+        feedback_affinity_scale: float = 0.25,
+        feedback_alpha_scale: float = 0.25,
+        alpha_scale: float = 1.0,
+        coupling_chunk_size: int = 256,
+        input_channels: int = 3,
+        channel_wise_coupling: bool = True,
     ) -> None:
         super().__init__()
         self.core = VectorKuramoto(
@@ -102,6 +195,12 @@ class GraphVectorKuramoto(nn.Module):
             coupling=coupling,
             dt=dt,
             attraction_strength=attraction_strength,
+            feedback_affinity_scale=feedback_affinity_scale,
+            feedback_alpha_scale=feedback_alpha_scale,
+            alpha_scale=alpha_scale,
+            coupling_chunk_size=coupling_chunk_size,
+            input_channels=input_channels,
+            channel_wise_coupling=channel_wise_coupling,
         )
 
     def forward(

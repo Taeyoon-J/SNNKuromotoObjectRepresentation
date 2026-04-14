@@ -3,7 +3,7 @@ from __future__ import annotations
 # This file groups reusable building blocks that sit between the low-level
 # dynamics and the full end-to-end model.
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -17,7 +17,20 @@ except ImportError:
 class GraphVectorKuramotoLayer(nn.Module):
     """Small wrapper module around the graph-aware Kuramoto dynamics."""
 
-    def __init__(self, num_nodes: int, osc_dim: int, coupling: float, dt: float, attraction_strength: float) -> None:
+    def __init__(
+        self,
+        num_nodes: int,
+        osc_dim: int,
+        coupling: float,
+        dt: float,
+        attraction_strength: float,
+        feedback_affinity_scale: float,
+        feedback_alpha_scale: float,
+        alpha_scale: float,
+        coupling_chunk_size: int,
+        input_channels: int,
+        channel_wise_coupling: bool,
+    ) -> None:
         super().__init__()
         self.kuramoto = GraphVectorKuramoto(
             num_nodes=num_nodes,
@@ -25,14 +38,20 @@ class GraphVectorKuramotoLayer(nn.Module):
             coupling=coupling,
             dt=dt,
             attraction_strength=attraction_strength,
+            feedback_affinity_scale=feedback_affinity_scale,
+            feedback_alpha_scale=feedback_alpha_scale,
+            alpha_scale=alpha_scale,
+            coupling_chunk_size=coupling_chunk_size,
+            input_channels=input_channels,
+            channel_wise_coupling=channel_wise_coupling,
         )
 
     def forward(
         self,
         theta_prev: torch.Tensor,
         gamma_prev: torch.Tensor,
-        affinity: torch.Tensor,
-        alpha_t: torch.Tensor,
+        affinity: Optional[torch.Tensor],
+        alpha_t: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Delegate the actual oscillator update to the Kuramoto layer.
         return self.kuramoto(theta_prev, gamma_prev, affinity, alpha_t)

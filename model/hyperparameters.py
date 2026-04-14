@@ -40,14 +40,33 @@ class ObjectRepresentationConfig:
     steps: int = 12
     # Update gamma and the SNN only every `readout_update_interval` theta steps.
     readout_update_interval: int = 5
+    # 0 means spike updates at the same t as gamma. 1 means gamma updates at t
+    # and the SNN spike is read one step later at t+1.
+    spike_update_offset: int = 0
     # Classifier only pools spike patterns from this time step onward.
     classifier_start_step: int = 60
+    # Weights for unsupervised object-spike binding losses.
+    within_object_similarity_weight: float = 1.0
+    between_object_difference_weight: float = 1.0
+    object_density_weight: float = 1.0
+    between_object_distance_weight: float = 1.0
+    background_suppression_weight: float = 1.0
+    # Minimum desired peak object activity and temporal scale for separation.
+    object_density_target: float = 0.6
+    object_time_distance_scale: float = 10.0
 
     # Euler integration step size for the Kuramoto dynamics.
     dt: float = 0.15
 
     # Global coupling strength between oscillators.
     coupling: float = 1.0
+    # Number of receiver nodes processed at once in pairwise Kuramoto coupling.
+    # Smaller values reduce GPU memory at the cost of more loop overhead.
+    coupling_chunk_size: int = 256
+    # Restrict global Kuramoto coupling to the same RGB channel. With HWC
+    # flattening this means red nodes couple with red, green with green, and
+    # blue with blue, reducing pairwise work by roughly 3x for RGB inputs.
+    channel_wise_coupling: bool = True
     # Attraction strength k_i toward the encoder/readout drive gamma.
     # In the current simplified implementation we use one shared scalar value.
     attraction_strength: float = 1.0
@@ -62,6 +81,9 @@ class ObjectRepresentationConfig:
 
     # Scale for phase-lag feedback and delay used in the sinusoidal gate.
     alpha_scale: float = 1.0
+    # Extra scales for reducing top-down feedback magnitude.
+    feedback_affinity_scale: float = 0.25
+    feedback_alpha_scale: float = 0.25
     delay: int = 2
 
     # Noise used when generating synthetic object images.
@@ -105,14 +127,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_classes", type=int, default=5)
     parser.add_argument("--steps", type=int, default=12)
     parser.add_argument("--readout_update_interval", type=int, default=5)
+    parser.add_argument("--spike_update_offset", type=int, default=0)
     parser.add_argument("--classifier_start_step", type=int, default=60)
+    parser.add_argument("--within_object_similarity_weight", type=float, default=1.0)
+    parser.add_argument("--between_object_difference_weight", type=float, default=1.0)
+    parser.add_argument("--object_density_weight", type=float, default=1.0)
+    parser.add_argument("--between_object_distance_weight", type=float, default=1.0)
+    parser.add_argument("--background_suppression_weight", type=float, default=1.0)
+    parser.add_argument("--object_density_target", type=float, default=0.6)
+    parser.add_argument("--object_time_distance_scale", type=float, default=10.0)
     parser.add_argument("--dt", type=float, default=0.15)
     parser.add_argument("--coupling", type=float, default=1.0)
+    parser.add_argument("--coupling_chunk_size", type=int, default=256)
+    parser.add_argument("--channel_wise_coupling", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--attraction_strength", type=float, default=1.0)
     parser.add_argument("--membrane_decay", type=float, default=0.92)
     parser.add_argument("--recurrent_scale", type=float, default=1.0)
     parser.add_argument("--threshold", type=float, default=0.6)
     parser.add_argument("--alpha_scale", type=float, default=1.0)
+    parser.add_argument("--feedback_affinity_scale", type=float, default=0.25)
+    parser.add_argument("--feedback_alpha_scale", type=float, default=0.25)
     parser.add_argument("--delay", type=int, default=2)
     parser.add_argument("--noise_std", type=float, default=0.01)
     parser.add_argument("--hidden_dim", type=int, default=16)

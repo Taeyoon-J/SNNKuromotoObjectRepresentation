@@ -50,6 +50,12 @@ class TopDownPathway(nn.Module):
             coupling=config.coupling,
             dt=config.dt,
             attraction_strength=config.attraction_strength,
+            feedback_affinity_scale=config.feedback_affinity_scale,
+            feedback_alpha_scale=config.feedback_alpha_scale,
+            alpha_scale=config.alpha_scale,
+            coupling_chunk_size=config.coupling_chunk_size,
+            input_channels=config.input_channels,
+            channel_wise_coupling=config.channel_wise_coupling,
         )
 
     def validate_input(self, x: torch.Tensor) -> None:
@@ -98,33 +104,21 @@ class TopDownPathway(nn.Module):
         """
         return 0.5 * (1.0 + torch.sin(theta_delayed))
 
-    def top_down_feedback_function(self, spikes: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def top_down_feedback_function(self, spikes: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Derive pairwise affinity and phase lag from the current spiking pattern.
+        Return compact feedback state for pairwise affinity/phase-lag generation.
 
-        The exact form can still be refined later, but this gives us a runnable
-        feedback mechanism now.
+        The Kuramoto layer expands this spike vector into pairwise terms in
+        chunks, avoiding a persistent [B, N, N] matrix for 64x64x3 inputs.
         """
-        # Build all pairwise spike differences: [B, N, 1] vs [B, 1, N].
-        spike_i = spikes.unsqueeze(2)
-        spike_j = spikes.unsqueeze(1)
-        delta = torch.abs(spike_i - spike_j)
-
-        # Larger spike mismatch produces stronger pairwise signal.
-        affinity = torch.log1p(delta)
-        # Normalize so values stay in a stable range across batches.
-        affinity = affinity / affinity.amax(dim=(1, 2), keepdim=True).clamp_min(1e-6)
-
-        # Convert affinity into a phase-lag term.
-        alpha = self.config.alpha_scale * (1.0 - affinity)
-        return affinity, alpha
+        return spikes, None
 
     def update_theta(
         self,
         theta_prev: torch.Tensor,
         gamma_prev: torch.Tensor,
-        affinity: torch.Tensor,
-        alpha: torch.Tensor,
+        affinity: Optional[torch.Tensor],
+        alpha: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Advance theta by one step using the most recent gamma."""
         return self.kuramoto(theta_prev, gamma_prev, affinity, alpha)
@@ -173,6 +167,139 @@ class ObjectRepresentationSNN(nn.Module):
         """Standard supervised classification loss."""
         return F.cross_entropy(logits, labels)
 
+    def _late_spike_window(self, spike_trace: torch.Tensor) -> torch.Tensor:
+        """Return the spike window used by the unsupervised object losses."""
+        start_idx = min(max(self.config.classifier_start_step - 1, 0), spike_trace.shape[1] - 1)
+        return spike_trace[:, start_idx:, :]
+
+    def _prepare_object_masks(self, object_masks: torch.Tensor, spike_trace: torch.Tensor) -> torch.Tensor:
+        """
+        Convert pixel-level object masks into flattened node-level masks.
+
+        Args:
+            object_masks: [O, H, W] or [B, O, H, W]
+            spike_trace: [B, T, N]
+
+        Returns:
+            node_masks: [B, O, N]
+        """
+        if object_masks.dim() == 3:
+            object_masks = object_masks.unsqueeze(0).expand(spike_trace.shape[0], -1, -1, -1)
+        if object_masks.dim() != 4:
+            raise ValueError(f"Expected object masks with shape [O, H, W] or [B, O, H, W], got {tuple(object_masks.shape)}")
+        if object_masks.shape[0] != spike_trace.shape[0]:
+            raise ValueError(f"Mask batch size {object_masks.shape[0]} does not match spike batch size {spike_trace.shape[0]}")
+
+        flat_masks = object_masks.to(device=spike_trace.device, dtype=spike_trace.dtype).view(object_masks.shape[0], object_masks.shape[1], -1)
+        node_masks = flat_masks.repeat_interleave(self.config.input_channels, dim=2)
+        if node_masks.shape[-1] != spike_trace.shape[-1]:
+            raise ValueError(f"Expanded mask has {node_masks.shape[-1]} nodes, but spike trace has {spike_trace.shape[-1]}")
+        return node_masks
+
+    def _object_activity(self, spike_trace: torch.Tensor, node_masks: torch.Tensor) -> torch.Tensor:
+        """Average spike activity inside each object mask, shape [B, T, O]."""
+        mask_sizes = node_masks.sum(dim=-1).clamp_min(1.0)
+        return torch.einsum("btn,bon->bto", spike_trace, node_masks) / mask_sizes.unsqueeze(1)
+
+    def object_spike_loss_components(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Compute reusable unsupervised object-spike loss components.
+
+        Components:
+            within_similarity: same-object pixels should share similar spike traces.
+            between_difference: different objects should avoid simultaneous activity.
+            object_density: each object should have at least one dense activation time.
+            between_distance: object activity centers should be temporally separated.
+            background_suppression: background nodes should stay quiet.
+        """
+        late_spikes = self._late_spike_window(spike_trace)
+        node_masks = self._prepare_object_masks(object_masks, late_spikes)
+        object_activity = self._object_activity(late_spikes, node_masks)
+
+        batch_size, steps, num_objects = object_activity.shape
+        eps = late_spikes.new_tensor(1e-6)
+        object_valid = node_masks.sum(dim=-1) > 0.5
+        valid_object_count = object_valid.to(late_spikes.dtype).sum().clamp_min(1.0)
+
+        # 1. Within-object spike similarity: penalize variance around each object's mean activity.
+        object_mean = object_activity.unsqueeze(-1)
+        mask_sizes = node_masks.sum(dim=-1).clamp_min(1.0)
+        squared_error = (late_spikes.unsqueeze(2) - object_mean).pow(2) * node_masks.unsqueeze(1)
+        within_per_object = squared_error.sum(dim=-1) / mask_sizes.unsqueeze(1)
+        within_similarity = (within_per_object * object_valid.unsqueeze(1)).sum() / (steps * valid_object_count)
+
+        if num_objects < 2:
+            zero = late_spikes.new_tensor(0.0)
+            between_difference = zero
+            between_distance = zero
+        else:
+            valid_pairs = (
+                object_valid.unsqueeze(-1)
+                & object_valid.unsqueeze(-2)
+                & ~torch.eye(num_objects, device=late_spikes.device, dtype=torch.bool).unsqueeze(0)
+            )
+            valid_pair_count = valid_pairs.to(late_spikes.dtype).sum().clamp_min(1.0)
+
+            # 2. Between-object spike difference: penalize simultaneous object activity.
+            pairwise_overlap = object_activity.unsqueeze(-1) * object_activity.unsqueeze(-2)
+            between_difference = (pairwise_overlap * valid_pairs.unsqueeze(1)).sum() / (steps * valid_pair_count)
+
+            # 4. Between-object spike distance: push temporal centers of object activity apart.
+            time_axis = torch.arange(steps, device=late_spikes.device, dtype=late_spikes.dtype)
+            activity_mass = object_activity.sum(dim=1).clamp_min(eps)
+            centers = (object_activity * time_axis.view(1, steps, 1)).sum(dim=1) / activity_mass
+            pairwise_distance = torch.abs(centers.unsqueeze(-1) - centers.unsqueeze(-2))
+            distance_scale = max(float(self.config.object_time_distance_scale), 1e-6)
+            between_distance = (torch.exp(-pairwise_distance / distance_scale) * valid_pairs).sum() / valid_pair_count
+
+        # 3. Object pixel density: each object should have a dense spike event at least once.
+        peak_activity = object_activity.max(dim=1).values
+        object_density_per_object = F.relu(float(self.config.object_density_target) - peak_activity)
+        object_density = (object_density_per_object * object_valid).sum() / valid_object_count
+
+        # 5. Background suppression, kept as an extra component for experiments.
+        object_union = node_masks.amax(dim=1)
+        background_mask = 1.0 - object_union
+        background_size = background_mask.sum(dim=-1).clamp_min(1.0)
+        background_suppression = (late_spikes * background_mask.unsqueeze(1)).sum(dim=-1) / background_size.unsqueeze(1)
+        background_suppression = background_suppression.mean()
+
+        return {
+            "within_similarity": within_similarity,
+            "between_difference": between_difference,
+            "object_density": object_density,
+            "between_distance": between_distance,
+            "background_suppression": background_suppression,
+        }
+
+    def unsupervised_object_loss_1234(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> torch.Tensor:
+        """Loss using components 1, 2, 3, and 4."""
+        components = self.object_spike_loss_components(spike_trace, object_masks)
+        return (
+            self.config.within_object_similarity_weight * components["within_similarity"]
+            + self.config.between_object_difference_weight * components["between_difference"]
+            + self.config.object_density_weight * components["object_density"]
+            + self.config.between_object_distance_weight * components["between_distance"]
+        )
+
+    def unsupervised_object_loss_124(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> torch.Tensor:
+        """Loss using components 1, 2, and 4."""
+        components = self.object_spike_loss_components(spike_trace, object_masks)
+        return (
+            self.config.within_object_similarity_weight * components["within_similarity"]
+            + self.config.between_object_difference_weight * components["between_difference"]
+            + self.config.between_object_distance_weight * components["between_distance"]
+        )
+
+    def unsupervised_object_loss_123(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> torch.Tensor:
+        """Loss using components 1, 2, and 3."""
+        components = self.object_spike_loss_components(spike_trace, object_masks)
+        return (
+            self.config.within_object_similarity_weight * components["within_similarity"]
+            + self.config.between_object_difference_weight * components["between_difference"]
+            + self.config.object_density_weight * components["object_density"]
+        )
+
     def build_adam_optimizer(self, lr: Optional[float] = None, weight_decay: Optional[float] = None):
         """Create an Adam optimizer using either custom values or config defaults."""
         return torch.optim.Adam(
@@ -181,13 +308,21 @@ class ObjectRepresentationSNN(nn.Module):
             weight_decay=self.config.weight_decay if weight_decay is None else weight_decay,
         )
 
-    def forward(self, x: torch.Tensor, return_history: bool = False):
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_history: bool = False,
+        return_spike_trace: bool = False,
+        return_pairwise_history: bool = False,
+    ):
         """
         Run the full model on a batch of images.
 
         Args:
             x: Input images, shape [B, H, W, C]
             return_history: Whether to keep intermediate states for analysis
+            return_spike_trace: Whether to return spikes without full theta/gamma history
+            return_pairwise_history: Whether to store large affinity/alpha matrices
         """
         # Input is used only to initialize gamma(0); theta(0) remains random.
         self.top_down.validate_input(x)
@@ -206,41 +341,59 @@ class ObjectRepresentationSNN(nn.Module):
         membrane = torch.zeros(batch_size, self.num_nodes, device=device)
         spikes = torch.zeros(batch_size, self.num_nodes, device=device)
 
-        # Start with identity-like affinity: each node is initially only certain about itself.
-        affinity = torch.eye(self.num_nodes, device=device).unsqueeze(0).repeat(batch_size, 1, 1)
-        alpha = torch.zeros(batch_size, self.num_nodes, self.num_nodes, device=device)
+        # No initial pairwise feedback. The old identity affinity produced zero
+        # coupling anyway because sin(theta_i - theta_i) = 0, but it allocated a
+        # huge [N, N] matrix for 64x64 inputs.
+        affinity = None
+        alpha = None
 
         # These lists store the trajectory over time for later visualization/analysis.
+        spike_hist: List[torch.Tensor] = []
+        theta_delay_buffer: List[torch.Tensor] = []
         theta_hist: List[torch.Tensor] = []
         gamma_hist: List[torch.Tensor] = []
         gate_hist: List[torch.Tensor] = []
         membrane_hist: List[torch.Tensor] = []
-        spike_hist: List[torch.Tensor] = []
         affinity_hist: List[torch.Tensor] = []
         alpha_hist: List[torch.Tensor] = []
 
         interval = max(1, int(self.config.readout_update_interval))
+        spike_update_offset = int(self.config.spike_update_offset)
+        if spike_update_offset not in (0, 1):
+            raise ValueError(f"spike_update_offset must be 0 or 1, got {spike_update_offset}")
 
         for step_idx in range(1, self.config.steps + 1):
             # 1. Theta evolves every step using the most recent gamma.
             theta = self.top_down.update_theta(theta, gamma, affinity, alpha)
 
-            # 2. Gamma/gate/spike only refresh every scheduled interval.
+            # 2. Gamma refreshes every scheduled interval.
             if step_idx % interval == 0:
                 gamma = self.top_down.readout_gamma_function(theta)
-                gate = self.top_down.build_gate_from_history(theta_hist, theta)
+                gate = self.top_down.build_gate_from_history(theta_delay_buffer, theta)
+
+            # 3. Spike can update either at the gamma step or one step later.
+            should_update_spike = (step_idx - spike_update_offset) % interval == 0
+            should_update_spike = should_update_spike and step_idx > spike_update_offset
+            if should_update_spike:
                 modulated_gamma = gate * gamma
                 membrane, spikes = self.bottom_up.forward_step(membrane, spikes, modulated_gamma)
                 affinity, alpha = self.top_down.top_down_feedback_function(spikes)
 
-            # Save the full state trajectory.
-            theta_hist.append(theta)
-            gamma_hist.append(gamma)
-            gate_hist.append(gate)
-            membrane_hist.append(membrane)
             spike_hist.append(spikes)
-            affinity_hist.append(affinity)
-            alpha_hist.append(alpha)
+            theta_delay_buffer.append(theta)
+            max_delay_history = max(1, int(self.config.delay) + 1)
+            if len(theta_delay_buffer) > max_delay_history:
+                theta_delay_buffer.pop(0)
+
+            if return_history:
+                # Save the full state trajectory only for visualization/analysis.
+                theta_hist.append(theta)
+                gamma_hist.append(gamma)
+                gate_hist.append(gate)
+                membrane_hist.append(membrane)
+                if return_pairwise_history:
+                    affinity_hist.append(affinity)
+                    alpha_hist.append(alpha)
 
         # Stack spikes over time to obtain a [B, T, N] spike trace.
         spike_trace = torch.stack(spike_hist, dim=1)
@@ -249,13 +402,18 @@ class ObjectRepresentationSNN(nn.Module):
 
         # History is optional in spirit, but we build it here so analysis code can
         # inspect internal dynamics after a forward pass.
-        history: Dict[str, torch.Tensor] = {
-            "theta": torch.stack(theta_hist, dim=1),
-            "gamma": torch.stack(gamma_hist, dim=1),
-            "gate": torch.stack(gate_hist, dim=1),
-            "membrane": torch.stack(membrane_hist, dim=1),
-            "spikes": spike_trace,
-            "affinity": torch.stack(affinity_hist, dim=1),
-            "alpha": torch.stack(alpha_hist, dim=1),
-        }
-        return logits, history if return_history else {}
+        history: Dict[str, torch.Tensor] = {}
+        if return_history:
+            history = {
+                "theta": torch.stack(theta_hist, dim=1),
+                "gamma": torch.stack(gamma_hist, dim=1),
+                "gate": torch.stack(gate_hist, dim=1),
+                "membrane": torch.stack(membrane_hist, dim=1),
+                "spikes": spike_trace,
+            }
+            if return_pairwise_history:
+                history["affinity"] = torch.stack(affinity_hist, dim=1)
+                history["alpha"] = torch.stack(alpha_hist, dim=1)
+        elif return_spike_trace:
+            history = {"spikes": spike_trace}
+        return logits, history if (return_history or return_spike_trace) else {}
