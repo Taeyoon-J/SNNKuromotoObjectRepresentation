@@ -151,7 +151,10 @@ def visualize_scheduled_kuramoto_readout(
         return (phase / max(max_abs, 1e-6)).numpy()
 
     def spike_to_map(spikes: torch.Tensor) -> np.ndarray:
-        image = spikes.view(image_height, image_width, input_channels).mean(dim=-1).detach().cpu()
+        if spikes.shape[-1] == image_height * image_width:
+            image = spikes.view(image_height, image_width).detach().cpu()
+        else:
+            image = spikes.view(image_height, image_width, input_channels).mean(dim=-1).detach().cpu()
         vmin = float(image.min())
         vmax = float(image.max())
         return ((image - vmin) / max(vmax - vmin, 1e-6)).numpy()

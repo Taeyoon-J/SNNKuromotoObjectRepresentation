@@ -69,7 +69,7 @@ class ObjectRepresentationConfig:
     channel_wise_coupling: bool = True
     # Attraction strength k_i toward the encoder/readout drive gamma.
     # In the current simplified implementation we use one shared scalar value.
-    attraction_strength: float = 1.0
+    attraction_strength: float = 3.0
 
     # Membrane potential carry-over in the SNN update.
     membrane_decay: float = 0.92
@@ -80,7 +80,7 @@ class ObjectRepresentationConfig:
     threshold: float = 0.6
 
     # Scale for phase-lag feedback and delay used in the sinusoidal gate.
-    alpha_scale: float = 1.0
+    alpha_scale: float = 5.0
     # Extra scales for reducing top-down feedback magnitude.
     feedback_affinity_scale: float = 0.25
     feedback_alpha_scale: float = 0.25
@@ -140,11 +140,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--coupling", type=float, default=1.0)
     parser.add_argument("--coupling_chunk_size", type=int, default=256)
     parser.add_argument("--channel_wise_coupling", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--attraction_strength", type=float, default=1.0)
+    parser.add_argument("--attraction_strength", type=float, default=3.0)
     parser.add_argument("--membrane_decay", type=float, default=0.92)
     parser.add_argument("--recurrent_scale", type=float, default=1.0)
     parser.add_argument("--threshold", type=float, default=0.6)
-    parser.add_argument("--alpha_scale", type=float, default=1.0)
+    parser.add_argument("--alpha_scale", type=float, default=5.0)
     parser.add_argument("--feedback_affinity_scale", type=float, default=0.25)
     parser.add_argument("--feedback_alpha_scale", type=float, default=0.25)
     parser.add_argument("--delay", type=int, default=2)

@@ -96,7 +96,10 @@ def spike_trace_to_candidate_masks(
     """
     start_idx = min(max(start_step - 1, 0), spike_trace.shape[0] - 1)
     late_spikes = spike_trace[start_idx:]
-    spike_maps = late_spikes.view(-1, image_height, image_width, input_channels).mean(dim=-1)
+    if late_spikes.shape[-1] == image_height * image_width:
+        spike_maps = late_spikes.view(-1, image_height, image_width)
+    else:
+        spike_maps = late_spikes.view(-1, image_height, image_width, input_channels).mean(dim=-1)
 
     candidates = []
     for spike_map in spike_maps:
@@ -278,7 +281,10 @@ def save_history_artifacts(
     theta_phase = torch.sin(history["theta"][0]).mean(dim=-1)
     theta_phase = theta_phase.view(cfg.steps, cfg.image_height, cfg.image_width, cfg.input_channels).mean(dim=-1)
     gamma_map = history["gamma"][0].mean(dim=-1).view(cfg.steps, cfg.image_height, cfg.image_width, cfg.input_channels)
-    spike_map = history["spikes"][0].view(cfg.steps, cfg.image_height, cfg.image_width, cfg.input_channels).mean(dim=-1)
+    if history["spikes"].shape[-1] == cfg.image_height * cfg.image_width:
+        spike_map = history["spikes"][0].view(cfg.steps, cfg.image_height, cfg.image_width)
+    else:
+        spike_map = history["spikes"][0].view(cfg.steps, cfg.image_height, cfg.image_width, cfg.input_channels).mean(dim=-1)
 
     np.savez_compressed(
         run_dir / "history_maps.npz",
@@ -448,6 +454,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image_size", type=int, default=32)
     parser.add_argument("--patch_size", type=int, default=32)
     parser.add_argument("--patch_stride", type=int, default=32)
+    parser.add_argument("--no_patch", action="store_true")
+    parser.add_argument("--object_patches_only", action="store_true")
+    parser.add_argument("--min_object_pixels", type=int, default=1)
     parser.add_argument("--osc_dim", type=int, default=4)
     parser.add_argument("--train_samples", type=int, default=5000)
     parser.add_argument("--train_fraction", type=float, default=0.8)
@@ -502,6 +511,8 @@ def main() -> None:
             print(run_id, make_run_name(*params))
         return
 
+    patch_size = None if args.no_patch else args.patch_size
+    patch_stride = None if args.no_patch else args.patch_stride
     test_samples = int(math.ceil(args.train_samples * (1.0 - args.train_fraction) / args.train_fraction))
     train_dataset = CLEVRObjectDataset(
         hdf5_path=args.hdf5_path,
@@ -510,8 +521,9 @@ def main() -> None:
         split="train",
         train_fraction=args.train_fraction,
         max_samples=args.train_samples,
-        patch_size=args.patch_size,
-        patch_stride=args.patch_stride,
+        patch_size=patch_size,
+        patch_stride=patch_stride,
+        min_object_pixels=args.min_object_pixels if args.object_patches_only else 0,
     )
     test_dataset = CLEVRObjectDataset(
         hdf5_path=args.hdf5_path,
@@ -520,8 +532,9 @@ def main() -> None:
         split="test",
         train_fraction=args.train_fraction,
         max_samples=test_samples,
-        patch_size=args.patch_size,
-        patch_stride=args.patch_stride,
+        patch_size=patch_size,
+        patch_stride=patch_stride,
+        min_object_pixels=args.min_object_pixels if args.object_patches_only else 0,
     )
 
     print(f"Valid runs: {len(sweep)}")

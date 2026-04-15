@@ -247,6 +247,7 @@ class CLEVRObjectDataset(Dataset):
         max_samples: Optional[int] = None,
         patch_size: Optional[int] = None,
         patch_stride: Optional[int] = None,
+        min_object_pixels: int = 0,
     ) -> None:
         super().__init__()
         self.hdf5_path = hdf5_path
@@ -257,6 +258,7 @@ class CLEVRObjectDataset(Dataset):
         self.max_samples = max_samples
         self.patch_size = patch_size
         self.patch_stride = patch_stride or patch_size
+        self.min_object_pixels = min_object_pixels
         self._h5 = None
 
         if split not in {"train", "test", "all"}:
@@ -270,22 +272,33 @@ class CLEVRObjectDataset(Dataset):
             image_height = int(h5_file["image"].shape[1])
             image_width = int(h5_file["image"].shape[2])
 
-        train_count = int(total_images * train_fraction)
-        if split == "train":
-            source_indices = list(range(train_count))
-        elif split == "test":
-            source_indices = list(range(train_count, total_images))
-        else:
-            source_indices = list(range(total_images))
+            train_count = int(total_images * train_fraction)
+            if split == "train":
+                source_indices = list(range(train_count))
+            elif split == "test":
+                source_indices = list(range(train_count, total_images))
+            else:
+                source_indices = list(range(total_images))
 
-        self.examples = self._build_examples(source_indices, image_height, image_width)
-        if max_samples is not None:
-            self.examples = self.examples[: int(max_samples)]
+            self.examples = self._build_examples(source_indices, image_height, image_width, h5_file)
 
-    def _build_examples(self, source_indices: List[int], image_height: int, image_width: int) -> List[Tuple[int, int, int]]:
+    def _build_examples(
+        self,
+        source_indices: List[int],
+        image_height: int,
+        image_width: int,
+        h5_file,
+    ) -> List[Tuple[int, int, int]]:
         """Build `(source_idx, top, left)` entries for full images or patches."""
+        max_examples = None if self.max_samples is None else int(self.max_samples)
         if self.patch_size is None:
-            return [(source_idx, 0, 0) for source_idx in source_indices]
+            examples = []
+            for source_idx in source_indices:
+                if self._patch_has_enough_object_pixels(h5_file, source_idx, 0, 0, image_height, image_width):
+                    examples.append((source_idx, 0, 0))
+                    if max_examples is not None and len(examples) >= max_examples:
+                        break
+            return examples
 
         if self.patch_size <= 0 or self.patch_stride is None or self.patch_stride <= 0:
             raise ValueError("patch_size and patch_stride must be positive when patch mode is enabled")
@@ -298,8 +311,27 @@ class CLEVRObjectDataset(Dataset):
         for source_idx in source_indices:
             for top in top_positions:
                 for left in left_positions:
-                    examples.append((source_idx, top, left))
+                    if self._patch_has_enough_object_pixels(h5_file, source_idx, top, left, self.patch_size, self.patch_size):
+                        examples.append((source_idx, top, left))
+                        if max_examples is not None and len(examples) >= max_examples:
+                            return examples
         return examples
+
+    def _patch_has_enough_object_pixels(
+        self,
+        h5_file,
+        source_idx: int,
+        top: int,
+        left: int,
+        height: int,
+        width: int,
+    ) -> bool:
+        """Return whether a candidate patch has enough non-background mask pixels."""
+        if self.min_object_pixels <= 0:
+            return True
+
+        mask_patch = h5_file["mask"][source_idx, top : top + height, left : left + width, 0]
+        return int(np.count_nonzero(mask_patch)) >= int(self.min_object_pixels)
 
     @staticmethod
     def _require_h5py():

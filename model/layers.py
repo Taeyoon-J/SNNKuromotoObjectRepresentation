@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 try:
     from .SNN_layers.vector_kuramoto import GraphVectorKuramoto
@@ -74,23 +75,35 @@ class ObjectReadoutSNN(nn.Module):
         threshold: float,
         recurrent_scale: float,
         classifier_start_step: int,
+        input_channels: int,
     ) -> None:
         super().__init__()
         # Keep these values as attributes so the update rule is easy to inspect.
         self.num_nodes = num_nodes
+        self.input_channels = input_channels
+        if num_nodes % input_channels != 0:
+            raise ValueError(f"num_nodes={num_nodes} must be divisible by input_channels={input_channels}")
+        self.num_pixels = num_nodes // input_channels
         self.membrane_decay = membrane_decay
         self.threshold = threshold
         self.recurrent_scale = recurrent_scale
         self.classifier_start_step = classifier_start_step
 
-        # Projects oscillator features into a scalar current for each node.
-        self.input_weight = nn.Linear(osc_dim, 1)
-        # Recurrent interaction among spiking units.
-        self.recurrent_weight = nn.Parameter(torch.randn(num_nodes, num_nodes) * 0.02)
+        # Projects each vector oscillator theta/gamma feature into a scalar current.
+        # The raw parameter is passed through softplus in forward_step so the
+        # SNN input drive cannot flip an object signal into negative current.
+        self.input_weight = nn.Linear(osc_dim, 1, bias=False)
+        with torch.no_grad():
+            desired_weight = torch.tensor(0.5)
+            self.input_weight.weight.fill_(torch.log(torch.expm1(desired_weight)).item())
+        # Learned per-pixel RGB mixing weights for sum_z w_xyz * gamma_xyz(t).
+        self.channel_weight = nn.Parameter(torch.ones(self.num_pixels, input_channels) / float(input_channels))
+        # Recurrent interaction among pixel-level spiking units.
+        self.recurrent_weight = nn.Parameter(torch.randn(self.num_pixels, self.num_pixels) * 0.02)
         # Final classifier applied after temporal pooling of spikes.
         self.classifier = nn.Sequential(
-            nn.LayerNorm(num_nodes),
-            nn.Linear(num_nodes, num_classes),
+            nn.LayerNorm(self.num_pixels),
+            nn.Linear(self.num_pixels, num_classes),
         )
 
     def forward_step(
@@ -103,12 +116,17 @@ class ObjectReadoutSNN(nn.Module):
         Single SNN update step.
 
         Args:
-            membrane_prev: Previous membrane state, [B, N]
-            spikes_prev: Previous spikes, [B, N]
+            membrane_prev: Previous pixel-level membrane state, [B, H*W]
+            spikes_prev: Previous pixel-level spikes, [B, H*W]
             modulated_gamma: Oscillator-driven input current, [B, N, D]
         """
-        # Convert oscillator features into scalar synaptic current per node.
-        synaptic_drive = self.input_weight(modulated_gamma).squeeze(-1)
+        # Convert each vector oscillator into scalar current per pixel-channel node.
+        positive_input_weight = F.softplus(self.input_weight.weight)
+        node_drive = F.linear(modulated_gamma, positive_input_weight).squeeze(-1)
+        # Compress RGB channel nodes into one pixel-level synaptic drive:
+        # I_xy(t) = sum_z w_xyz * gamma_xyz(t).
+        channel_drive = node_drive.view(node_drive.shape[0], self.num_pixels, self.input_channels)
+        synaptic_drive = (channel_drive * self.channel_weight.unsqueeze(0)).sum(dim=-1)
         # Add recurrent contributions from previous spikes.
         recurrent_drive = self.recurrent_scale * (spikes_prev @ self.recurrent_weight)
 
@@ -128,7 +146,7 @@ class ObjectReadoutSNN(nn.Module):
         """
         Pool spike activity from the configured late time window and map it to class logits.
 
-        `spike_trace` has shape [B, T, N].
+        `spike_trace` has shape [B, T, H*W].
         """
         # Convert the human-facing time step t=60 into zero-based index 59.
         # If the run is shorter than that, fall back to the final available step.

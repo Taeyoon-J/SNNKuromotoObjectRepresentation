@@ -43,6 +43,7 @@ class TopDownPathway(nn.Module):
         self.gamma_readout = nn.Linear(config.osc_dim, config.osc_dim)
         # Per-node scaling for gamma.
         self.gamma_gain = nn.Parameter(torch.ones(1, self.num_nodes, config.osc_dim))
+        self.reset_gamma_parameters()
         # Core Kuramoto dynamics block.
         self.kuramoto = GraphVectorKuramotoLayer(
             num_nodes=self.num_nodes,
@@ -57,6 +58,21 @@ class TopDownPathway(nn.Module):
             input_channels=config.input_channels,
             channel_wise_coupling=config.channel_wise_coupling,
         )
+
+    def reset_gamma_parameters(self) -> None:
+        """Initialize gamma readout so image/object contrast survives early steps."""
+        with torch.no_grad():
+            # Monotonic image -> gamma(0): brighter input produces larger gamma.
+            self.gamma_initializer.weight.fill_(1.0)
+            self.gamma_initializer.bias.zero_()
+
+            # Start theta -> gamma as identity instead of a random mixing.
+            self.gamma_readout.weight.zero_()
+            self.gamma_readout.bias.zero_()
+            identity_dim = min(self.gamma_readout.weight.shape)
+            self.gamma_readout.weight[:identity_dim, :identity_dim].copy_(torch.eye(identity_dim))
+
+            self.gamma_gain.fill_(1.0)
 
     def validate_input(self, x: torch.Tensor) -> None:
         """Validate the input shape without using it to initialize oscillators."""
@@ -102,7 +118,10 @@ class TopDownPathway(nn.Module):
 
         This is the bridge from Kuramoto dynamics to the SNN input modulation.
         """
-        return 0.5 * (1.0 + torch.sin(theta_delayed))
+        # Compress vector oscillator dimension D to one scalar phase per
+        # pixel-channel oscillator: [B, H*W*C, D] -> [B, H*W*C, 1].
+        theta_scalar = theta_delayed.mean(dim=-1, keepdim=True)
+        return 0.5 * (1.0 + torch.sin(theta_scalar))
 
     def top_down_feedback_function(self, spikes: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
@@ -111,7 +130,13 @@ class TopDownPathway(nn.Module):
         The Kuramoto layer expands this spike vector into pairwise terms in
         chunks, avoiding a persistent [B, N, N] matrix for 64x64x3 inputs.
         """
-        return spikes, None
+        if spikes.shape[-1] == self.num_nodes:
+            feedback_spikes = spikes
+        else:
+            # SNN spikes are pixel-level [B, H*W]. Expand them back to the
+            # pixel-channel oscillator layout [B, H*W*C] for Kuramoto feedback.
+            feedback_spikes = spikes.repeat_interleave(self.config.input_channels, dim=-1)
+        return feedback_spikes, None
 
     def update_theta(
         self,
@@ -161,6 +186,7 @@ class ObjectRepresentationSNN(nn.Module):
             threshold=self.config.threshold,
             recurrent_scale=self.config.recurrent_scale,
             classifier_start_step=self.config.classifier_start_step,
+            input_channels=self.config.input_channels,
         )
 
     def loss_function(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -178,10 +204,10 @@ class ObjectRepresentationSNN(nn.Module):
 
         Args:
             object_masks: [O, H, W] or [B, O, H, W]
-            spike_trace: [B, T, N]
+            spike_trace: [B, T, H*W] for pixel spikes or [B, T, H*W*C] for node spikes
 
         Returns:
-            node_masks: [B, O, N]
+            node_masks: [B, O, spike_trace_nodes]
         """
         if object_masks.dim() == 3:
             object_masks = object_masks.unsqueeze(0).expand(spike_trace.shape[0], -1, -1, -1)
@@ -191,7 +217,10 @@ class ObjectRepresentationSNN(nn.Module):
             raise ValueError(f"Mask batch size {object_masks.shape[0]} does not match spike batch size {spike_trace.shape[0]}")
 
         flat_masks = object_masks.to(device=spike_trace.device, dtype=spike_trace.dtype).view(object_masks.shape[0], object_masks.shape[1], -1)
-        node_masks = flat_masks.repeat_interleave(self.config.input_channels, dim=2)
+        if flat_masks.shape[-1] == spike_trace.shape[-1]:
+            node_masks = flat_masks
+        else:
+            node_masks = flat_masks.repeat_interleave(self.config.input_channels, dim=2)
         if node_masks.shape[-1] != spike_trace.shape[-1]:
             raise ValueError(f"Expanded mask has {node_masks.shape[-1]} nodes, but spike trace has {spike_trace.shape[-1]}")
         return node_masks
@@ -337,9 +366,9 @@ class ObjectRepresentationSNN(nn.Module):
             device=device,
         ) - torch.pi
         gamma = self.top_down.initialize_gamma_from_input(x)
-        gate = torch.zeros(batch_size, self.num_nodes, self.config.osc_dim, device=device)
-        membrane = torch.zeros(batch_size, self.num_nodes, device=device)
-        spikes = torch.zeros(batch_size, self.num_nodes, device=device)
+        gate = torch.zeros(batch_size, self.num_nodes, 1, device=device)
+        membrane = torch.zeros(batch_size, self.bottom_up.num_pixels, device=device)
+        spikes = torch.zeros(batch_size, self.bottom_up.num_pixels, device=device)
 
         # No initial pairwise feedback. The old identity affinity produced zero
         # coupling anyway because sin(theta_i - theta_i) = 0, but it allocated a
