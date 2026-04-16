@@ -138,46 +138,43 @@ def visualize_scheduled_kuramoto_readout(
 
     `steps_to_show` uses 1-based model time indices, e.g. [20, 40].
 
-    The model has one vector oscillator per pixel-channel:
-        [H * W * C, D]
+    The model has one vector oscillator per pixel:
+        [H * W, D]
 
-    A direct 2D image must compress both C and D. To make the compression
-    explicit, theta/gamma are visualized as phase-color maps:
+    A direct 2D image must compress D. To make the compression explicit,
+    theta/gamma are visualized as phase-color maps:
         hue        = vector phase angle atan2(dim_1, dim_0)
-        brightness = agreement across the RGB-channel oscillators at a pixel
+        brightness = vector magnitude or fixed brightness
 
-    This preserves the most important qualitative information: whether pixels
-    are moving together in oscillator phase, and where RGB-channel oscillators
-    disagree.
+    We do not plot theta magnitude because theta is unit-normalized by design,
+    so its magnitude map is uninformative. Instead we plot theta-gamma cosine
+    alignment to show whether theta is following the current readout drive.
     """
 
-    def _phase_and_agreement(values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compress [H*W*C, D] vectors into per-pixel circular phase maps."""
-        vectors = values.view(image_height, image_width, input_channels, -1).detach().cpu()
+    def _phase_and_magnitude(values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compress [H*W, D] vectors into per-pixel phase and magnitude maps."""
+        vectors = values.view(image_height, image_width, -1).detach().cpu()
         if vectors.shape[-1] < 2:
             phase = vectors[..., 0]
         else:
             phase = torch.atan2(vectors[..., 1], vectors[..., 0])
 
-        # Circular mean over the three RGB-channel oscillators at each pixel.
-        sin_mean = torch.sin(phase).mean(dim=-1)
-        cos_mean = torch.cos(phase).mean(dim=-1)
-        mean_phase = torch.atan2(sin_mean, cos_mean)
-        agreement = torch.sqrt(sin_mean.pow(2) + cos_mean.pow(2)).clamp(0.0, 1.0)
-        return mean_phase, agreement
+        magnitude = vectors.norm(dim=-1)
+        magnitude = magnitude / magnitude.max().clamp_min(1e-6)
+        return phase, magnitude
 
-    def vector_phase_to_rgb(values: torch.Tensor) -> np.ndarray:
-        """Map vector phase to HSV: hue=phase, value=RGB-channel agreement."""
-        phase, agreement = _phase_and_agreement(values)
+    def vector_phase_to_rgb(values: torch.Tensor, use_magnitude: bool = True) -> np.ndarray:
+        """Map vector phase to HSV: hue=phase, value=normalized magnitude."""
+        phase, magnitude = _phase_and_magnitude(values)
         hue = ((phase / (2.0 * math.pi)) + 0.5).numpy()
         saturation = np.ones_like(hue) * 0.9
-        value = agreement.numpy()
+        value = magnitude.numpy() if use_magnitude else np.ones_like(hue)
         return hsv_to_rgb(np.stack([hue, saturation, value], axis=-1))
 
-    def vector_agreement_map(values: torch.Tensor) -> np.ndarray:
-        """Return how similar the three RGB-channel oscillator phases are."""
-        _, agreement = _phase_and_agreement(values)
-        return agreement.numpy()
+    def vector_magnitude_map(values: torch.Tensor) -> np.ndarray:
+        """Return normalized per-pixel vector magnitude."""
+        _, magnitude = _phase_and_magnitude(values)
+        return magnitude.numpy()
 
     def vector_component_rgb(values: torch.Tensor) -> np.ndarray:
         """
@@ -186,7 +183,7 @@ def visualize_scheduled_kuramoto_readout(
         This is not object color. It is a diagnostic view of the learned vector
         representation direction, useful for gamma(0) and gamma(t).
         """
-        vectors = values.view(image_height, image_width, input_channels, -1).mean(dim=2).detach().cpu()
+        vectors = values.view(image_height, image_width, -1).detach().cpu()
         if vectors.shape[-1] < 3:
             pad = torch.zeros(*vectors.shape[:-1], 3 - vectors.shape[-1])
             vectors = torch.cat([vectors, pad], dim=-1)
@@ -195,11 +192,20 @@ def visualize_scheduled_kuramoto_readout(
         vmax = rgb.amax(dim=(0, 1), keepdim=True)
         return ((rgb - vmin) / (vmax - vmin).clamp_min(1e-6)).numpy()
 
+    def alignment_map(theta_values: torch.Tensor, gamma_values: torch.Tensor) -> np.ndarray:
+        """Cosine alignment map scaled from [-1, 1] to [0, 1]."""
+        theta_vectors = theta_values.view(image_height, image_width, -1).detach().cpu()
+        gamma_vectors = gamma_values.view(image_height, image_width, -1).detach().cpu()
+        theta_norm = torch.nn.functional.normalize(theta_vectors, dim=-1, eps=1e-6)
+        gamma_norm = torch.nn.functional.normalize(gamma_vectors, dim=-1, eps=1e-6)
+        cosine = (theta_norm * gamma_norm).sum(dim=-1).clamp(-1.0, 1.0)
+        return ((cosine + 1.0) * 0.5).numpy()
+
     def spike_to_map(spikes: torch.Tensor) -> np.ndarray:
         if spikes.shape[-1] == image_height * image_width:
             image = spikes.view(image_height, image_width).detach().cpu()
         else:
-            image = spikes.view(image_height, image_width, input_channels).mean(dim=-1).detach().cpu()
+            raise ValueError(f"Expected pixel-level spikes with {image_height * image_width} nodes, got {spikes.shape[-1]}")
         vmin = float(image.min())
         vmax = float(image.max())
         return ((image - vmin) / max(vmax - vmin, 1e-6)).numpy()
@@ -214,8 +220,16 @@ def visualize_scheduled_kuramoto_readout(
         for mask in masks[valid_masks][:10]:
             ax.contour(mask.numpy(), levels=[0.5], linewidths=0.45, colors="white", alpha=0.85)
 
-    cols = len(steps_to_show) + 2
-    fig, axes = plt.subplots(5, cols, figsize=(2.8 * cols, 12.0))
+    theta0 = history.get("theta0")
+    gamma0_from_history = history.get("gamma0", gamma0.unsqueeze(0)).squeeze(0)
+    if theta0 is None:
+        raise ValueError("history must contain theta0 for t=0 visualization")
+    theta0 = theta0[0] if theta0.dim() == 3 else theta0
+    gamma0_display = gamma0_from_history[0] if gamma0_from_history.dim() == 3 else gamma0_from_history
+
+    display_steps = [0] + sorted(set([step for step in steps_to_show if step > 0]))
+    cols = len(display_steps) + 1
+    fig, axes = plt.subplots(5, cols, figsize=(2.9 * cols, 12.2))
     axes = np.atleast_2d(axes)
 
     axes[0, 0].imshow(input_image.detach().cpu().numpy())
@@ -230,66 +244,73 @@ def visualize_scheduled_kuramoto_readout(
     else:
         axes[1, 0].axis("off")
 
-    axes[2, 0].imshow(vector_component_rgb(gamma0))
-    axes[2, 0].set_title("gamma(0)\nRGB = vec dims 0..2")
-    axes[2, 0].axis("off")
-    add_mask_contours(axes[2, 0])
-
-    axes[3, 0].imshow(vector_phase_to_rgb(gamma0))
-    axes[3, 0].set_title("gamma(0) phase\nhue=phase, value=RGB sync")
-    axes[3, 0].axis("off")
-    add_mask_contours(axes[3, 0])
-
-    axes[4, 0].imshow(vector_agreement_map(gamma0), cmap="viridis", vmin=0.0, vmax=1.0)
-    axes[4, 0].set_title("gamma(0)\nRGB-channel sync")
-    axes[4, 0].axis("off")
-    add_mask_contours(axes[4, 0])
-
-    for row in range(5):
-        axes[row, 1].axis("off")
-    axes[0, 1].text(
+    axes[2, 0].text(
         0.0,
         0.95,
         "Legend\n"
-        "theta/gamma phase:\n"
+        "theta phase:\n"
         "  hue = oscillator phase\n"
-        "  bright = RGB nodes agree\n"
+        "  brightness fixed\n"
+        "alignment:\n"
+        "  black = opposite theta/gamma\n"
+        "  yellow = theta follows gamma\n"
+        "gamma magnitude:\n"
+        "  dark = weak readout\n"
+        "  bright = strong readout\n"
         "spike:\n"
-        "  black = quiet\n"
-        "  yellow/white = high spike\n"
+        "  dark = quiet\n"
+        "  bright = high spike\n"
         "white lines = GT masks",
         va="top",
-        fontsize=9,
+        fontsize=8.5,
     )
+    axes[2, 0].axis("off")
 
-    for col_idx, step in enumerate(steps_to_show, start=2):
-        hist_idx = step - 1
+    axes[3, 0].axis("off")
+    axes[4, 0].axis("off")
 
-        axes[0, col_idx].imshow(vector_phase_to_rgb(history["theta"][0, hist_idx]))
-        axes[0, col_idx].set_title(f"theta({step}) phase")
+    for col_idx, step in enumerate(display_steps, start=1):
+        if step == 0:
+            theta_values = theta0
+            gamma_values = gamma0_display
+            spike_values = None
+            title_step = "t=0"
+        else:
+            hist_idx = step - 1
+            theta_values = history["theta"][0, hist_idx]
+            gamma_values = history["gamma"][0, hist_idx]
+            spike_values = history["spikes"][0, hist_idx]
+            title_step = f"t={step}"
+
+        axes[0, col_idx].imshow(vector_phase_to_rgb(theta_values, use_magnitude=False))
+        axes[0, col_idx].set_title(f"{title_step}\ntheta phase")
         axes[0, col_idx].axis("off")
         add_mask_contours(axes[0, col_idx])
 
-        axes[1, col_idx].imshow(vector_component_rgb(history["gamma"][0, hist_idx]))
-        axes[1, col_idx].set_title(f"gamma({step}) vec RGB")
+        axes[1, col_idx].imshow(alignment_map(theta_values, gamma_values), cmap="viridis", vmin=0.0, vmax=1.0)
+        axes[1, col_idx].set_title(f"{title_step}\ntheta-gamma align")
         axes[1, col_idx].axis("off")
         add_mask_contours(axes[1, col_idx])
 
-        axes[2, col_idx].imshow(vector_phase_to_rgb(history["gamma"][0, hist_idx]))
-        axes[2, col_idx].set_title(f"gamma({step}) phase")
+        axes[2, col_idx].imshow(vector_component_rgb(gamma_values))
+        axes[2, col_idx].set_title(f"{title_step}\ngamma vec RGB")
         axes[2, col_idx].axis("off")
         add_mask_contours(axes[2, col_idx])
 
-        axes[3, col_idx].imshow(vector_agreement_map(history["theta"][0, hist_idx]), cmap="viridis", vmin=0.0, vmax=1.0)
-        axes[3, col_idx].set_title(f"theta({step}) RGB sync")
+        axes[3, col_idx].imshow(vector_magnitude_map(gamma_values), cmap="magma", vmin=0.0, vmax=1.0)
+        axes[3, col_idx].set_title(f"{title_step}\ngamma magnitude")
         axes[3, col_idx].axis("off")
         add_mask_contours(axes[3, col_idx])
 
-        axes[4, col_idx].imshow(spike_to_map(history["spikes"][0, hist_idx]), cmap="magma", vmin=0.0, vmax=1.0)
-        axes[4, col_idx].set_title(f"spike({step})")
+        if spike_values is None:
+            axes[4, col_idx].imshow(np.zeros((image_height, image_width)), cmap="magma", vmin=0.0, vmax=1.0)
+            axes[4, col_idx].set_title("t=0\nspike not run")
+        else:
+            axes[4, col_idx].imshow(spike_to_map(spike_values), cmap="magma", vmin=0.0, vmax=1.0)
+            axes[4, col_idx].set_title(f"{title_step}\nspike")
         axes[4, col_idx].axis("off")
         add_mask_contours(axes[4, col_idx])
 
-    fig.suptitle("Scheduled Kuramoto -> Gamma -> Spike (interpretable oscillator maps)", y=1.01)
+    fig.suptitle("Theta/Gamma/Spike Timeline: t=0 and scheduled readout steps", y=1.01)
     fig.tight_layout()
     return fig

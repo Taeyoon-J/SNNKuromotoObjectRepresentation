@@ -38,20 +38,19 @@ class TopDownPathway(nn.Module):
         self.osc_dim = config.osc_dim
 
         # Input is used only to seed gamma(0), not to initialize theta(0).
-        # A small trainable CNN extracts channel-aware image features. Its last
-        # layer produces C * D channels so each RGB pixel-channel oscillator
-        # receives its own D-dimensional gamma vector instead of copying one
-        # pixel-level vector across R/G/B.
+        # A small trainable CNN encodes each RGB pixel into one D-dimensional
+        # gamma vector. RGB remains an input feature, not a separate oscillator
+        # axis, so the oscillator state is [B, H*W, D].
         self.gamma_encoder = nn.Sequential(
             nn.Conv2d(config.input_channels, config.gamma_encoder_hidden, kernel_size=3, padding=1),
             nn.SiLU(),
             nn.Conv2d(config.gamma_encoder_hidden, config.gamma_encoder_hidden, kernel_size=3, padding=1),
             nn.SiLU(),
-            nn.Conv2d(config.gamma_encoder_hidden, config.input_channels * config.osc_dim, kernel_size=1),
+            nn.Conv2d(config.gamma_encoder_hidden, config.osc_dim, kernel_size=1),
         )
         self.gamma_encoder_skip = nn.Conv2d(
             config.input_channels,
-            config.input_channels * config.osc_dim,
+            config.osc_dim,
             kernel_size=1,
             bias=False,
         )
@@ -89,14 +88,12 @@ class TopDownPathway(nn.Module):
                     if module.bias is not None:
                         module.bias.zero_()
 
-            # Channel-preserving residual path. If enabled, red only seeds red
-            # oscillator vectors, green only green, and blue only blue. We write
-            # the raw channel value into vector dimension 0; the CNN can learn
-            # richer dimensions on top.
+            # RGB-preserving residual path. If enabled, raw RGB values seed the
+            # first vector dimensions directly; the CNN can learn richer object
+            # features on top.
             self.gamma_encoder_skip.weight.zero_()
-            for channel_idx in range(self.config.input_channels):
-                out_idx = channel_idx * self.config.osc_dim
-                self.gamma_encoder_skip.weight[out_idx, channel_idx, 0, 0] = 1.0
+            for channel_idx in range(min(self.config.input_channels, self.osc_dim)):
+                self.gamma_encoder_skip.weight[channel_idx, channel_idx, 0, 0] = 1.0
 
             # Start theta -> gamma as identity instead of a random mixing.
             self.gamma_readout.weight.zero_()
@@ -111,9 +108,8 @@ class TopDownPathway(nn.Module):
         Convert an RGB image into CNN feature vectors for gamma(0).
 
         Returns:
-            Tensor with shape [B, H*W*C, D]. Each pixel-channel oscillator keeps
-            its own D-dimensional feature vector, preserving RGB-channel value
-            identity before flattening.
+            Tensor with shape [B, H*W, D]. Each RGB pixel is encoded into one
+            D-dimensional vector oscillator drive.
         """
         self.validate_input(x)
         b, h, w, c = x.shape
@@ -133,11 +129,8 @@ class TopDownPathway(nn.Module):
         if skip_scale != 0.0:
             feature_map = feature_map + skip_scale * self.gamma_encoder_skip(encoder_input)
 
-        # [B, C*D, H, W] -> [B, H, W, C, D] -> [B, H*W*C, D].
-        # This matches theta_{x,y,z}: one oscillator node per pixel-channel.
-        channel_features = feature_map.view(b, c, self.osc_dim, h, w)
-        channel_features = channel_features.permute(0, 3, 4, 1, 2).contiguous()
-        return channel_features.view(b, h * w * c, self.osc_dim)
+        # [B, D, H, W] -> [B, H*W, D].
+        return feature_map.permute(0, 2, 3, 1).reshape(b, h * w, self.osc_dim)
 
     def validate_input(self, x: torch.Tensor) -> None:
         """Validate the input shape without using it to initialize oscillators."""
@@ -152,8 +145,8 @@ class TopDownPathway(nn.Module):
         """
         Build gamma(0) from the input image only.
 
-        Each pixel-channel entry becomes one oscillator node, but this input
-        drive is used only for the initial readout seed.
+        Each pixel becomes one oscillator node. RGB values are encoded into the
+        D-dimensional gamma vector and used only for the initial readout seed.
         """
         encoded_input = self.encode_input_features(x) * self.gamma_gain
         gamma_direction = F.normalize(encoded_input, dim=-1, eps=1e-6)
@@ -163,14 +156,16 @@ class TopDownPathway(nn.Module):
         """
         Return the per-node RGB value amplitude used to preserve image contrast.
 
-        Shape: [B, H*W*C, 1]. If disabled, every node receives amplitude 1,
+        Shape: [B, H*W, 1]. If disabled, every node receives amplitude 1,
         which recovers the pure unit-vector gamma behavior.
         """
         self.validate_input(x)
         b, h, w, c = x.shape
         if not self.config.preserve_gamma_value_amplitude:
-            return torch.ones(b, h * w * c, 1, device=x.device, dtype=x.dtype)
-        amplitude = x.reshape(b, h * w * c, 1)
+            return torch.ones(b, h * w, 1, device=x.device, dtype=x.dtype)
+        # Use RGB luminance/mean intensity as the scalar amplitude. Color still
+        # lives in the D-dimensional gamma direction produced by the CNN.
+        amplitude = x.mean(dim=-1, keepdim=True).reshape(b, h * w, 1)
         value_floor = float(self.config.gamma_value_floor)
         if value_floor > 0.0:
             amplitude = amplitude.clamp_min(value_floor)
@@ -219,9 +214,7 @@ class TopDownPathway(nn.Module):
         if spikes.shape[-1] == self.num_nodes:
             feedback_spikes = spikes
         else:
-            # SNN spikes are pixel-level [B, H*W]. Expand them back to the
-            # pixel-channel oscillator layout [B, H*W*C] for Kuramoto feedback.
-            feedback_spikes = spikes.repeat_interleave(self.config.input_channels, dim=-1)
+            raise ValueError(f"Expected pixel-level spikes with {self.num_nodes} nodes, got {spikes.shape[-1]}")
         return feedback_spikes, None
 
     def update_theta(
@@ -290,7 +283,7 @@ class ObjectRepresentationSNN(nn.Module):
 
         Args:
             object_masks: [O, H, W] or [B, O, H, W]
-            spike_trace: [B, T, H*W] for pixel spikes or [B, T, H*W*C] for node spikes
+            spike_trace: [B, T, H*W] for pixel-level spikes
 
         Returns:
             node_masks: [B, O, spike_trace_nodes]
@@ -303,13 +296,9 @@ class ObjectRepresentationSNN(nn.Module):
             raise ValueError(f"Mask batch size {object_masks.shape[0]} does not match spike batch size {spike_trace.shape[0]}")
 
         flat_masks = object_masks.to(device=spike_trace.device, dtype=spike_trace.dtype).view(object_masks.shape[0], object_masks.shape[1], -1)
-        if flat_masks.shape[-1] == spike_trace.shape[-1]:
-            node_masks = flat_masks
-        else:
-            node_masks = flat_masks.repeat_interleave(self.config.input_channels, dim=2)
-        if node_masks.shape[-1] != spike_trace.shape[-1]:
-            raise ValueError(f"Expanded mask has {node_masks.shape[-1]} nodes, but spike trace has {spike_trace.shape[-1]}")
-        return node_masks
+        if flat_masks.shape[-1] != spike_trace.shape[-1]:
+            raise ValueError(f"Flattened mask has {flat_masks.shape[-1]} nodes, but spike trace has {spike_trace.shape[-1]}")
+        return flat_masks
 
     def _object_activity(self, spike_trace: torch.Tensor, node_masks: torch.Tensor) -> torch.Tensor:
         """Average spike activity inside each object mask, shape [B, T, O]."""
@@ -355,9 +344,13 @@ class ObjectRepresentationSNN(nn.Module):
             )
             valid_pair_count = valid_pairs.to(late_spikes.dtype).sum().clamp_min(1.0)
 
-            # 2. Between-object spike difference: penalize simultaneous object activity.
-            pairwise_overlap = object_activity.unsqueeze(-1) * object_activity.unsqueeze(-2)
-            between_difference = (pairwise_overlap * valid_pairs.unsqueeze(1)).sum() / (steps * valid_pair_count)
+            # 2. Between-object spike difference: penalize similarly timed
+            # activity profiles. Normalizing by each object's total activity
+            # avoids the trivial solution where every object simply stays quiet
+            # to reduce raw overlap.
+            temporal_profile = object_activity / object_activity.sum(dim=1, keepdim=True).clamp_min(eps)
+            profile_overlap = (temporal_profile.unsqueeze(-1) * temporal_profile.unsqueeze(-2)).sum(dim=1)
+            between_difference = (profile_overlap * valid_pairs).sum() / valid_pair_count
 
             # 4. Between-object spike distance: push temporal centers of object activity apart.
             time_axis = torch.arange(steps, device=late_spikes.device, dtype=late_spikes.dtype)
@@ -388,31 +381,34 @@ class ObjectRepresentationSNN(nn.Module):
         }
 
     def unsupervised_object_loss_1234(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> torch.Tensor:
-        """Loss using components 1, 2, 3, and 4."""
+        """Loss using components 1, 2, 3, and 4 plus background suppression."""
         components = self.object_spike_loss_components(spike_trace, object_masks)
         return (
             self.config.within_object_similarity_weight * components["within_similarity"]
             + self.config.between_object_difference_weight * components["between_difference"]
             + self.config.object_density_weight * components["object_density"]
             + self.config.between_object_distance_weight * components["between_distance"]
+            + self.config.background_suppression_weight * components["background_suppression"]
         )
 
     def unsupervised_object_loss_124(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> torch.Tensor:
-        """Loss using components 1, 2, and 4."""
+        """Loss using components 1, 2, and 4 plus background suppression."""
         components = self.object_spike_loss_components(spike_trace, object_masks)
         return (
             self.config.within_object_similarity_weight * components["within_similarity"]
             + self.config.between_object_difference_weight * components["between_difference"]
             + self.config.between_object_distance_weight * components["between_distance"]
+            + self.config.background_suppression_weight * components["background_suppression"]
         )
 
     def unsupervised_object_loss_123(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> torch.Tensor:
-        """Loss using components 1, 2, and 3."""
+        """Loss using components 1, 2, and 3 plus background suppression."""
         components = self.object_spike_loss_components(spike_trace, object_masks)
         return (
             self.config.within_object_similarity_weight * components["within_similarity"]
             + self.config.between_object_difference_weight * components["between_difference"]
             + self.config.object_density_weight * components["object_density"]
+            + self.config.background_suppression_weight * components["background_suppression"]
         )
 
     def build_adam_optimizer(self, lr: Optional[float] = None, weight_decay: Optional[float] = None):
@@ -455,6 +451,8 @@ class ObjectRepresentationSNN(nn.Module):
         theta = F.normalize(theta, dim=-1, eps=1e-6)
         gamma_amplitude = self.top_down.gamma_value_amplitude(x)
         gamma = self.top_down.initialize_gamma_from_input(x)
+        theta_initial = theta
+        gamma_initial = gamma
         gate = torch.zeros(batch_size, self.num_nodes, 1, device=device)
         membrane = torch.zeros(batch_size, self.bottom_up.num_pixels, device=device)
         spikes = torch.zeros(batch_size, self.bottom_up.num_pixels, device=device)
@@ -525,6 +523,8 @@ class ObjectRepresentationSNN(nn.Module):
         history: Dict[str, torch.Tensor] = {}
         if return_history:
             history = {
+                "theta0": theta_initial,
+                "gamma0": gamma_initial,
                 "theta": torch.stack(theta_hist, dim=1),
                 "gamma": torch.stack(gamma_hist, dim=1),
                 "gate": torch.stack(gate_hist, dim=1),

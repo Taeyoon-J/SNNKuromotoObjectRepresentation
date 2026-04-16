@@ -59,10 +59,13 @@ def build_config(
         epochs=args.epochs,
         lr=args.lr,
         weight_decay=args.weight_decay,
+        coupling=args.coupling,
+        attraction_strength=args.attraction_strength,
         coupling_chunk_size=args.coupling_chunk_size,
         channel_wise_coupling=args.channel_wise_coupling,
         fixed_alpha_during_training=args.fixed_alpha_during_training,
         fixed_alpha_value=args.fixed_alpha_value,
+        background_suppression_weight=args.background_suppression_weight,
         gamma_encoder_hidden=args.gamma_encoder_hidden,
         gamma_encoder_blur_kernel=args.gamma_encoder_blur_kernel,
         gamma_encoder_skip_scale=args.gamma_encoder_skip_scale,
@@ -106,18 +109,59 @@ def spike_trace_to_candidate_masks(
     if late_spikes.shape[-1] == image_height * image_width:
         spike_maps = late_spikes.view(-1, image_height, image_width)
     else:
-        spike_maps = late_spikes.view(-1, image_height, image_width, input_channels).mean(dim=-1)
+        raise ValueError(f"Expected pixel-level spike trace with {image_height * image_width} nodes, got {late_spikes.shape[-1]}")
 
     candidates = []
     for spike_map in spike_maps:
         threshold = torch.quantile(spike_map.flatten(), score_quantile)
         candidate = spike_map >= threshold
-        if int(candidate.sum().item()) >= min_pixels:
-            candidates.append(candidate.float())
+        for component in split_binary_mask_components(candidate):
+            if int(component.sum().item()) >= min_pixels:
+                candidates.append(component.float())
 
     if not candidates:
         return spike_maps.new_zeros((0, image_height, image_width))
     return torch.stack(candidates, dim=0)
+
+
+def split_binary_mask_components(mask: torch.Tensor) -> List[torch.Tensor]:
+    """
+    Split a binary 2D mask into 4-connected components.
+
+    Spike maps often highlight two disconnected objects in the same timestep.
+    Treating that as one candidate mask destroys IoU, so the scorer evaluates
+    each connected region as a separate object hypothesis.
+    """
+    if mask.dim() != 2:
+        raise ValueError(f"Expected a 2D binary mask, got {tuple(mask.shape)}")
+
+    mask_cpu = mask.detach().cpu().bool()
+    height, width = mask_cpu.shape
+    visited = torch.zeros_like(mask_cpu, dtype=torch.bool)
+    components: List[torch.Tensor] = []
+
+    for row in range(height):
+        for col in range(width):
+            if not bool(mask_cpu[row, col]) or bool(visited[row, col]):
+                continue
+
+            component = torch.zeros_like(mask_cpu, dtype=torch.bool)
+            stack = [(row, col)]
+            visited[row, col] = True
+            while stack:
+                y, x = stack.pop()
+                component[y, x] = True
+                for next_y, next_x in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+                    if next_y < 0 or next_y >= height or next_x < 0 or next_x >= width:
+                        continue
+                    if bool(visited[next_y, next_x]) or not bool(mask_cpu[next_y, next_x]):
+                        continue
+                    visited[next_y, next_x] = True
+                    stack.append((next_y, next_x))
+
+            components.append(component.to(device=mask.device))
+
+    return components
 
 
 def pairwise_iou(pred_masks: torch.Tensor, target_masks: torch.Tensor) -> torch.Tensor:
@@ -179,7 +223,15 @@ def score_one_sample(
     valid_targets = object_masks.sum(dim=(1, 2)) > 0
     targets = object_masks[valid_targets].float()
     if targets.shape[0] == 0:
-        return {"score_90_coverage": 0.0, "score_mean_one_to_one_iou": 0.0, "num_masks": 0.0, "num_candidates": 0.0}
+        return {
+            "score_90_coverage": 0.0,
+            "score_50_coverage": 0.0,
+            "score_70_coverage": 0.0,
+            "score_iou_threshold_coverage": 0.0,
+            "score_mean_one_to_one_iou": 0.0,
+            "num_masks": 0.0,
+            "num_candidates": 0.0,
+        }
 
     candidates = spike_trace_to_candidate_masks(
         spike_trace=spike_trace,
@@ -195,10 +247,15 @@ def score_one_sample(
 
     matched_ious = [score for _, _, score in matches]
     represented = sum(score >= iou_threshold for score in matched_ious)
+    represented_50 = sum(score >= 0.50 for score in matched_ious)
+    represented_70 = sum(score >= 0.70 for score in matched_ious)
+    represented_90 = sum(score >= 0.90 for score in matched_ious)
     mean_iou = sum(matched_ious) / float(targets.shape[0])
-    coverage = represented / float(targets.shape[0])
     return {
-        "score_90_coverage": coverage,
+        "score_90_coverage": represented_90 / float(targets.shape[0]),
+        "score_50_coverage": represented_50 / float(targets.shape[0]),
+        "score_70_coverage": represented_70 / float(targets.shape[0]),
+        "score_iou_threshold_coverage": represented / float(targets.shape[0]),
         "score_mean_one_to_one_iou": mean_iou,
         "num_masks": float(targets.shape[0]),
         "num_candidates": float(candidates.shape[0]),
@@ -219,6 +276,9 @@ def evaluate_model(
     totals = {
         "test_loss": 0.0,
         "score_90_coverage": 0.0,
+        "score_50_coverage": 0.0,
+        "score_70_coverage": 0.0,
+        "score_iou_threshold_coverage": 0.0,
         "score_mean_one_to_one_iou": 0.0,
         "num_masks": 0.0,
         "num_candidates": 0.0,
@@ -243,7 +303,15 @@ def evaluate_model(
                 score_quantile=args.score_quantile,
                 min_pixels=args.min_pixels,
             )
-            for key in ("score_90_coverage", "score_mean_one_to_one_iou", "num_masks", "num_candidates"):
+            for key in (
+                "score_90_coverage",
+                "score_50_coverage",
+                "score_70_coverage",
+                "score_iou_threshold_coverage",
+                "score_mean_one_to_one_iou",
+                "num_masks",
+                "num_candidates",
+            ):
                 totals[key] += sample_scores[key]
         seen += batch_size
 
@@ -268,7 +336,7 @@ def save_history_artifacts(
     image = sample["image"].unsqueeze(0).to(device)
     with torch.no_grad():
         _, history = model(image, return_history=True)
-        gamma0 = model.top_down.initialize_gamma_from_input(image)[0].detach().cpu()
+        gamma0 = history["gamma0"][0].detach().cpu()
 
     steps_to_show = sorted(set([step for step in args.visual_steps if 1 <= step <= cfg.steps]))
     if not steps_to_show:
@@ -287,30 +355,26 @@ def save_history_artifacts(
     )
     figure.savefig(run_dir / "theta_gamma_spikes.png", dpi=160, bbox_inches="tight")
 
-    theta_vectors = history["theta"][0].view(cfg.steps, cfg.image_height, cfg.image_width, cfg.input_channels, cfg.osc_dim)
-    gamma_vectors = history["gamma"][0].view(cfg.steps, cfg.image_height, cfg.image_width, cfg.input_channels, cfg.osc_dim)
-    theta_phase_per_channel = torch.atan2(theta_vectors[..., 1], theta_vectors[..., 0])
-    gamma_phase_per_channel = torch.atan2(gamma_vectors[..., 1], gamma_vectors[..., 0])
-    theta_channel_sync = torch.sqrt(
-        torch.sin(theta_phase_per_channel).mean(dim=-1).pow(2)
-        + torch.cos(theta_phase_per_channel).mean(dim=-1).pow(2)
-    )
-    gamma_channel_sync = torch.sqrt(
-        torch.sin(gamma_phase_per_channel).mean(dim=-1).pow(2)
-        + torch.cos(gamma_phase_per_channel).mean(dim=-1).pow(2)
-    )
-    gamma_components = gamma_vectors.mean(dim=3)[..., : min(3, cfg.osc_dim)]
+    theta_vectors = history["theta"][0].view(cfg.steps, cfg.image_height, cfg.image_width, cfg.osc_dim)
+    gamma_vectors = history["gamma"][0].view(cfg.steps, cfg.image_height, cfg.image_width, cfg.osc_dim)
+    theta_phase = torch.atan2(theta_vectors[..., 1], theta_vectors[..., 0])
+    gamma_phase = torch.atan2(gamma_vectors[..., 1], gamma_vectors[..., 0])
+    theta_magnitude = theta_vectors.norm(dim=-1)
+    gamma_magnitude = gamma_vectors.norm(dim=-1)
+    gamma_components = gamma_vectors[..., : min(3, cfg.osc_dim)]
     if history["spikes"].shape[-1] == cfg.image_height * cfg.image_width:
         spike_map = history["spikes"][0].view(cfg.steps, cfg.image_height, cfg.image_width)
     else:
-        spike_map = history["spikes"][0].view(cfg.steps, cfg.image_height, cfg.image_width, cfg.input_channels).mean(dim=-1)
+        raise ValueError(f"Expected pixel-level spikes with {cfg.image_height * cfg.image_width} nodes, got {history['spikes'].shape[-1]}")
 
     np.savez_compressed(
         run_dir / "history_maps.npz",
-        theta_phase_per_channel=theta_phase_per_channel.detach().cpu().numpy(),
-        gamma_phase_per_channel=gamma_phase_per_channel.detach().cpu().numpy(),
-        theta_channel_sync=theta_channel_sync.detach().cpu().numpy(),
-        gamma_channel_sync=gamma_channel_sync.detach().cpu().numpy(),
+        theta0=history["theta0"][0].detach().cpu().numpy(),
+        gamma0=history["gamma0"][0].detach().cpu().numpy(),
+        theta_phase=theta_phase.detach().cpu().numpy(),
+        gamma_phase=gamma_phase.detach().cpu().numpy(),
+        theta_magnitude=theta_magnitude.detach().cpu().numpy(),
+        gamma_magnitude=gamma_magnitude.detach().cpu().numpy(),
         gamma_components=gamma_components.detach().cpu().numpy(),
         spikes=spike_map.detach().cpu().numpy(),
         object_masks=sample["object_masks"].detach().cpu().numpy(),
@@ -487,10 +551,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--grad_clip", type=float, default=1.0)
+    parser.add_argument("--coupling", type=float, default=1.0)
+    parser.add_argument("--attraction_strength", type=float, default=3.0)
     parser.add_argument("--coupling_chunk_size", type=int, default=128)
-    parser.add_argument("--channel_wise_coupling", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--channel_wise_coupling", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--fixed_alpha_during_training", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--fixed_alpha_value", type=float, default=0.0)
+    parser.add_argument("--background_suppression_weight", type=float, default=3.0)
     parser.add_argument("--gamma_encoder_hidden", type=int, default=16)
     parser.add_argument("--gamma_encoder_blur_kernel", type=int, default=1)
     parser.add_argument("--gamma_encoder_skip_scale", type=float, default=0.10)
@@ -530,7 +597,7 @@ def main() -> None:
 
     if args.image_size >= 64 and args.osc_dim >= 4:
         print(
-            f"Warning: {args.image_size}x{args.image_size}x3 uses N={args.image_size * args.image_size * 3} nodes. Pairwise Kuramoto is chunked now, "
+            f"Warning: {args.image_size}x{args.image_size} uses N={args.image_size * args.image_size} pixel oscillator nodes. Pairwise Kuramoto is chunked now, "
             "but this is still heavy. Start with --max_runs 1 and --max_eval_batches 1."
         )
 

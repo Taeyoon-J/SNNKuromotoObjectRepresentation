@@ -153,7 +153,9 @@ class VectorKuramoto(nn.Module):
             affinity:   None, [B, N] feedback spikes, or [B, N, N]
             alpha_t:    None or [B, N, N]
         """
-        if affinity is None:
+        if float(self.coupling) == 0.0:
+            coupling_term = torch.zeros_like(theta_prev)
+        elif affinity is None:
             coupling_term = torch.zeros_like(theta_prev)
         elif affinity.dim() == 2:
             if self.channel_wise_coupling:

@@ -29,8 +29,9 @@ class ObjectRepresentationConfig:
     input_channels: int = 3
 
     # Oscillator representation size per oscillator node.
-    # We interpret each pixel-channel entry as one oscillator node, and each node
-    # carries a vector state of length `osc_dim`.
+    # We use one oscillator node per image pixel. RGB values are encoded into
+    # the D-dimensional gamma vector instead of becoming separate oscillator
+    # nodes.
     osc_dim: int = 4
 
     # Classification target size for the synthetic objects.
@@ -50,7 +51,7 @@ class ObjectRepresentationConfig:
     between_object_difference_weight: float = 1.0
     object_density_weight: float = 1.0
     between_object_distance_weight: float = 1.0
-    background_suppression_weight: float = 1.0
+    background_suppression_weight: float = 3.0
     # Minimum desired peak object activity and temporal scale for separation.
     object_density_target: float = 0.6
     object_time_distance_scale: float = 10.0
@@ -63,10 +64,10 @@ class ObjectRepresentationConfig:
     # Number of receiver nodes processed at once in pairwise Kuramoto coupling.
     # Smaller values reduce GPU memory at the cost of more loop overhead.
     coupling_chunk_size: int = 256
-    # Restrict global Kuramoto coupling to the same RGB channel. With HWC
-    # flattening this means red nodes couple with red, green with green, and
-    # blue with blue, reducing pairwise work by roughly 3x for RGB inputs.
-    channel_wise_coupling: bool = True
+    # Legacy option kept for compatibility. With pixel-level oscillators there
+    # is no RGB oscillator axis, so this has no effect unless num_nodes is laid
+    # out with explicit channels by a future experiment.
+    channel_wise_coupling: bool = False
     # Attraction strength k_i toward the encoder/readout drive gamma.
     # In the current simplified implementation we use one shared scalar value.
     attraction_strength: float = 3.0
@@ -100,10 +101,10 @@ class ObjectRepresentationConfig:
     gamma_encoder_hidden: int = 16
     # Optional pre-CNN blur kernel. 1 means use the raw image directly.
     gamma_encoder_blur_kernel: int = 1
-    # Residual raw-image strength in gamma(0). This preserves per-channel RGB
-    # value identity while the CNN learns richer AKOrN-style stimulus features.
+    # Residual raw-image strength in gamma(0). This preserves RGB value cues
+    # while the CNN learns richer AKOrN-style stimulus features.
     gamma_encoder_skip_scale: float = 0.10
-    # Preserve the original per-pixel-channel value as gamma amplitude. Without
+    # Preserve the original per-pixel value as gamma amplitude. Without
     # this, unit-normalizing gamma erases object/background intensity contrast.
     preserve_gamma_value_amplitude: bool = True
     gamma_value_floor: float = 0.0
@@ -123,8 +124,8 @@ class ObjectRepresentationConfig:
 
     @property
     def num_nodes(self) -> int:
-        """Total number of oscillator nodes once H, W, and C are flattened together."""
-        return self.image_height * self.image_width * self.input_channels
+        """Total number of oscillator nodes, one vector oscillator per pixel."""
+        return self.image_height * self.image_width
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -148,13 +149,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--between_object_difference_weight", type=float, default=1.0)
     parser.add_argument("--object_density_weight", type=float, default=1.0)
     parser.add_argument("--between_object_distance_weight", type=float, default=1.0)
-    parser.add_argument("--background_suppression_weight", type=float, default=1.0)
+    parser.add_argument("--background_suppression_weight", type=float, default=3.0)
     parser.add_argument("--object_density_target", type=float, default=0.6)
     parser.add_argument("--object_time_distance_scale", type=float, default=10.0)
     parser.add_argument("--dt", type=float, default=0.15)
     parser.add_argument("--coupling", type=float, default=1.0)
     parser.add_argument("--coupling_chunk_size", type=int, default=256)
-    parser.add_argument("--channel_wise_coupling", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--channel_wise_coupling", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--attraction_strength", type=float, default=3.0)
     parser.add_argument("--membrane_decay", type=float, default=0.92)
     parser.add_argument("--recurrent_scale", type=float, default=1.0)

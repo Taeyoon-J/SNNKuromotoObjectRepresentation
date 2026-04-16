@@ -223,17 +223,18 @@ def run_kuramoto_binding_test(
     theta_history = history["theta"][0].detach().cpu()
     steps = theta_history.shape[0]
 
-    # Collapse the vector oscillator dimension to one scalar phase per node.
-    phase_history = theta_history.mean(dim=-1)
+    # Collapse the vector oscillator direction to one scalar phase per pixel.
+    if theta_history.shape[-1] >= 2:
+        phase_history = torch.atan2(theta_history[..., 1], theta_history[..., 0])
+    else:
+        phase_history = theta_history.squeeze(-1)
 
-    # Flatten HWC-style node layout back to per-pixel masks, then expand each mask
-    # across channels because each pixel-channel entry is its own oscillator node.
-    flat_pixel_masks = object_masks.view(object_masks.shape[0], -1)
-    channel_masks = flat_pixel_masks.repeat_interleave(cfg.input_channels, dim=1)
+    # One oscillator node now corresponds to one image pixel.
+    pixel_masks = object_masks.view(object_masks.shape[0], -1)
 
     intra_sync_values = []
     mean_phase_vectors = []
-    for mask in channel_masks:
+    for mask in pixel_masks:
         active = mask > 0.5
         object_phases = phase_history[:, active]
         phase_vector = torch.exp(1j * object_phases)
