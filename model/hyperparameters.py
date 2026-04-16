@@ -81,6 +81,10 @@ class ObjectRepresentationConfig:
 
     # Scale for phase-lag feedback and delay used in the sinusoidal gate.
     alpha_scale: float = 5.0
+    # Keep pairwise phase-lag alpha fixed during training. This lets affinity
+    # feedback change coupling strength without also moving the phase delay.
+    fixed_alpha_during_training: bool = True
+    fixed_alpha_value: float = 0.0
     # Extra scales for reducing top-down feedback magnitude.
     feedback_affinity_scale: float = 0.25
     feedback_alpha_scale: float = 0.25
@@ -92,6 +96,17 @@ class ObjectRepresentationConfig:
     # Hidden dimension is reserved for future extensions and helps keep the config
     # similar in spirit to the TINGTING code organization.
     hidden_dim: int = 16
+    # Hidden channels used by the trainable CNN that initializes gamma(0).
+    gamma_encoder_hidden: int = 16
+    # Optional pre-CNN blur kernel. 1 means use the raw image directly.
+    gamma_encoder_blur_kernel: int = 1
+    # Residual raw-image strength in gamma(0). This preserves per-channel RGB
+    # value identity while the CNN learns richer AKOrN-style stimulus features.
+    gamma_encoder_skip_scale: float = 0.10
+    # Preserve the original per-pixel-channel value as gamma amplitude. Without
+    # this, unit-normalizing gamma erases object/background intensity contrast.
+    preserve_gamma_value_amplitude: bool = True
+    gamma_value_floor: float = 0.0
 
     # Standard training hyperparameters.
     batch_size: int = 16
@@ -145,11 +160,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recurrent_scale", type=float, default=1.0)
     parser.add_argument("--threshold", type=float, default=0.6)
     parser.add_argument("--alpha_scale", type=float, default=5.0)
+    parser.add_argument("--fixed_alpha_during_training", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--fixed_alpha_value", type=float, default=0.0)
     parser.add_argument("--feedback_affinity_scale", type=float, default=0.25)
     parser.add_argument("--feedback_alpha_scale", type=float, default=0.25)
     parser.add_argument("--delay", type=int, default=2)
     parser.add_argument("--noise_std", type=float, default=0.01)
     parser.add_argument("--hidden_dim", type=int, default=16)
+    parser.add_argument("--gamma_encoder_hidden", type=int, default=16)
+    parser.add_argument("--gamma_encoder_blur_kernel", type=int, default=1)
+    parser.add_argument("--gamma_encoder_skip_scale", type=float, default=0.10)
+    parser.add_argument("--preserve_gamma_value_amplitude", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--gamma_value_floor", type=float, default=0.0)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-3)

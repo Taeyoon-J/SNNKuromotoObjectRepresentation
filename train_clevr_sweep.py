@@ -61,6 +61,13 @@ def build_config(
         weight_decay=args.weight_decay,
         coupling_chunk_size=args.coupling_chunk_size,
         channel_wise_coupling=args.channel_wise_coupling,
+        fixed_alpha_during_training=args.fixed_alpha_during_training,
+        fixed_alpha_value=args.fixed_alpha_value,
+        gamma_encoder_hidden=args.gamma_encoder_hidden,
+        gamma_encoder_blur_kernel=args.gamma_encoder_blur_kernel,
+        gamma_encoder_skip_scale=args.gamma_encoder_skip_scale,
+        preserve_gamma_value_amplitude=args.preserve_gamma_value_amplitude,
+        gamma_value_floor=args.gamma_value_floor,
         seed=args.seed,
         device=args.device,
     )
@@ -275,12 +282,24 @@ def save_history_artifacts(
         image_width=cfg.image_width,
         input_channels=cfg.input_channels,
         steps_to_show=steps_to_show,
+        object_masks=sample["object_masks"],
+        label_map=sample["label_map"],
     )
     figure.savefig(run_dir / "theta_gamma_spikes.png", dpi=160, bbox_inches="tight")
 
-    theta_phase = torch.sin(history["theta"][0]).mean(dim=-1)
-    theta_phase = theta_phase.view(cfg.steps, cfg.image_height, cfg.image_width, cfg.input_channels).mean(dim=-1)
-    gamma_map = history["gamma"][0].mean(dim=-1).view(cfg.steps, cfg.image_height, cfg.image_width, cfg.input_channels)
+    theta_vectors = history["theta"][0].view(cfg.steps, cfg.image_height, cfg.image_width, cfg.input_channels, cfg.osc_dim)
+    gamma_vectors = history["gamma"][0].view(cfg.steps, cfg.image_height, cfg.image_width, cfg.input_channels, cfg.osc_dim)
+    theta_phase_per_channel = torch.atan2(theta_vectors[..., 1], theta_vectors[..., 0])
+    gamma_phase_per_channel = torch.atan2(gamma_vectors[..., 1], gamma_vectors[..., 0])
+    theta_channel_sync = torch.sqrt(
+        torch.sin(theta_phase_per_channel).mean(dim=-1).pow(2)
+        + torch.cos(theta_phase_per_channel).mean(dim=-1).pow(2)
+    )
+    gamma_channel_sync = torch.sqrt(
+        torch.sin(gamma_phase_per_channel).mean(dim=-1).pow(2)
+        + torch.cos(gamma_phase_per_channel).mean(dim=-1).pow(2)
+    )
+    gamma_components = gamma_vectors.mean(dim=3)[..., : min(3, cfg.osc_dim)]
     if history["spikes"].shape[-1] == cfg.image_height * cfg.image_width:
         spike_map = history["spikes"][0].view(cfg.steps, cfg.image_height, cfg.image_width)
     else:
@@ -288,8 +307,11 @@ def save_history_artifacts(
 
     np.savez_compressed(
         run_dir / "history_maps.npz",
-        theta_phase=theta_phase.detach().cpu().numpy(),
-        gamma=gamma_map.detach().cpu().numpy(),
+        theta_phase_per_channel=theta_phase_per_channel.detach().cpu().numpy(),
+        gamma_phase_per_channel=gamma_phase_per_channel.detach().cpu().numpy(),
+        theta_channel_sync=theta_channel_sync.detach().cpu().numpy(),
+        gamma_channel_sync=gamma_channel_sync.detach().cpu().numpy(),
+        gamma_components=gamma_components.detach().cpu().numpy(),
         spikes=spike_map.detach().cpu().numpy(),
         object_masks=sample["object_masks"].detach().cpu().numpy(),
         label_map=sample["label_map"].detach().cpu().numpy(),
@@ -467,6 +489,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--coupling_chunk_size", type=int, default=128)
     parser.add_argument("--channel_wise_coupling", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--fixed_alpha_during_training", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--fixed_alpha_value", type=float, default=0.0)
+    parser.add_argument("--gamma_encoder_hidden", type=int, default=16)
+    parser.add_argument("--gamma_encoder_blur_kernel", type=int, default=1)
+    parser.add_argument("--gamma_encoder_skip_scale", type=float, default=0.10)
+    parser.add_argument("--preserve_gamma_value_amplitude", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--gamma_value_floor", type=float, default=0.0)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=7)

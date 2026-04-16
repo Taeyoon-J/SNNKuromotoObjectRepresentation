@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import hsv_to_rgb
 import numpy as np
 import torch
 
@@ -129,26 +130,70 @@ def visualize_scheduled_kuramoto_readout(
     image_width: int,
     input_channels: int,
     steps_to_show: List[int],
+    object_masks: torch.Tensor | None = None,
+    label_map: torch.Tensor | None = None,
 ):
     """
     Show Kuramoto phase maps together with gamma and spike maps at scheduled steps.
 
     `steps_to_show` uses 1-based model time indices, e.g. [20, 40].
-    The Kuramoto row visualizes mean sin(theta), which is easier to interpret
-    than raw vector-valued theta.
+
+    The model has one vector oscillator per pixel-channel:
+        [H * W * C, D]
+
+    A direct 2D image must compress both C and D. To make the compression
+    explicit, theta/gamma are visualized as phase-color maps:
+        hue        = vector phase angle atan2(dim_1, dim_0)
+        brightness = agreement across the RGB-channel oscillators at a pixel
+
+    This preserves the most important qualitative information: whether pixels
+    are moving together in oscillator phase, and where RGB-channel oscillators
+    disagree.
     """
 
-    def node_vector_to_rgb_like(values: torch.Tensor) -> np.ndarray:
-        image = values.mean(dim=-1).view(image_height, image_width, input_channels).detach().cpu()
-        vmin = float(image.min())
-        vmax = float(image.max())
-        return ((image - vmin) / max(vmax - vmin, 1e-6)).numpy()
+    def _phase_and_agreement(values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compress [H*W*C, D] vectors into per-pixel circular phase maps."""
+        vectors = values.view(image_height, image_width, input_channels, -1).detach().cpu()
+        if vectors.shape[-1] < 2:
+            phase = vectors[..., 0]
+        else:
+            phase = torch.atan2(vectors[..., 1], vectors[..., 0])
 
-    def theta_to_phase_map(theta: torch.Tensor) -> np.ndarray:
-        phase = torch.sin(theta).mean(dim=-1)
-        phase = phase.view(image_height, image_width, input_channels).mean(dim=-1).detach().cpu()
-        max_abs = float(phase.abs().max())
-        return (phase / max(max_abs, 1e-6)).numpy()
+        # Circular mean over the three RGB-channel oscillators at each pixel.
+        sin_mean = torch.sin(phase).mean(dim=-1)
+        cos_mean = torch.cos(phase).mean(dim=-1)
+        mean_phase = torch.atan2(sin_mean, cos_mean)
+        agreement = torch.sqrt(sin_mean.pow(2) + cos_mean.pow(2)).clamp(0.0, 1.0)
+        return mean_phase, agreement
+
+    def vector_phase_to_rgb(values: torch.Tensor) -> np.ndarray:
+        """Map vector phase to HSV: hue=phase, value=RGB-channel agreement."""
+        phase, agreement = _phase_and_agreement(values)
+        hue = ((phase / (2.0 * math.pi)) + 0.5).numpy()
+        saturation = np.ones_like(hue) * 0.9
+        value = agreement.numpy()
+        return hsv_to_rgb(np.stack([hue, saturation, value], axis=-1))
+
+    def vector_agreement_map(values: torch.Tensor) -> np.ndarray:
+        """Return how similar the three RGB-channel oscillator phases are."""
+        _, agreement = _phase_and_agreement(values)
+        return agreement.numpy()
+
+    def vector_component_rgb(values: torch.Tensor) -> np.ndarray:
+        """
+        Show the first three vector components as RGB after min-max scaling.
+
+        This is not object color. It is a diagnostic view of the learned vector
+        representation direction, useful for gamma(0) and gamma(t).
+        """
+        vectors = values.view(image_height, image_width, input_channels, -1).mean(dim=2).detach().cpu()
+        if vectors.shape[-1] < 3:
+            pad = torch.zeros(*vectors.shape[:-1], 3 - vectors.shape[-1])
+            vectors = torch.cat([vectors, pad], dim=-1)
+        rgb = vectors[..., :3]
+        vmin = rgb.amin(dim=(0, 1), keepdim=True)
+        vmax = rgb.amax(dim=(0, 1), keepdim=True)
+        return ((rgb - vmin) / (vmax - vmin).clamp_min(1e-6)).numpy()
 
     def spike_to_map(spikes: torch.Tensor) -> np.ndarray:
         if spikes.shape[-1] == image_height * image_width:
@@ -159,37 +204,92 @@ def visualize_scheduled_kuramoto_readout(
         vmax = float(image.max())
         return ((image - vmin) / max(vmax - vmin, 1e-6)).numpy()
 
+    def add_mask_contours(ax) -> None:
+        if object_masks is None:
+            return
+        masks = object_masks.detach().cpu()
+        if masks.dim() == 2:
+            masks = masks.unsqueeze(0)
+        valid_masks = masks.reshape(masks.shape[0], -1).sum(dim=1) > 0
+        for mask in masks[valid_masks][:10]:
+            ax.contour(mask.numpy(), levels=[0.5], linewidths=0.45, colors="white", alpha=0.85)
+
     cols = len(steps_to_show) + 2
-    fig, axes = plt.subplots(3, cols, figsize=(2.8 * cols, 8.0))
+    fig, axes = plt.subplots(5, cols, figsize=(2.8 * cols, 12.0))
     axes = np.atleast_2d(axes)
 
     axes[0, 0].imshow(input_image.detach().cpu().numpy())
-    axes[0, 0].set_title("Input")
+    axes[0, 0].set_title("Input RGB")
     axes[0, 0].axis("off")
-    axes[1, 0].axis("off")
-    axes[2, 0].axis("off")
+    add_mask_contours(axes[0, 0])
 
-    axes[0, 1].imshow(node_vector_to_rgb_like(gamma0))
-    axes[0, 1].set_title("gamma(0)")
-    axes[0, 1].axis("off")
-    axes[1, 1].axis("off")
-    axes[2, 1].axis("off")
+    if label_map is not None:
+        axes[1, 0].imshow(label_map.detach().cpu().numpy(), cmap="tab20")
+        axes[1, 0].set_title("GT object IDs")
+        axes[1, 0].axis("off")
+    else:
+        axes[1, 0].axis("off")
+
+    axes[2, 0].imshow(vector_component_rgb(gamma0))
+    axes[2, 0].set_title("gamma(0)\nRGB = vec dims 0..2")
+    axes[2, 0].axis("off")
+    add_mask_contours(axes[2, 0])
+
+    axes[3, 0].imshow(vector_phase_to_rgb(gamma0))
+    axes[3, 0].set_title("gamma(0) phase\nhue=phase, value=RGB sync")
+    axes[3, 0].axis("off")
+    add_mask_contours(axes[3, 0])
+
+    axes[4, 0].imshow(vector_agreement_map(gamma0), cmap="viridis", vmin=0.0, vmax=1.0)
+    axes[4, 0].set_title("gamma(0)\nRGB-channel sync")
+    axes[4, 0].axis("off")
+    add_mask_contours(axes[4, 0])
+
+    for row in range(5):
+        axes[row, 1].axis("off")
+    axes[0, 1].text(
+        0.0,
+        0.95,
+        "Legend\n"
+        "theta/gamma phase:\n"
+        "  hue = oscillator phase\n"
+        "  bright = RGB nodes agree\n"
+        "spike:\n"
+        "  black = quiet\n"
+        "  yellow/white = high spike\n"
+        "white lines = GT masks",
+        va="top",
+        fontsize=9,
+    )
 
     for col_idx, step in enumerate(steps_to_show, start=2):
         hist_idx = step - 1
 
-        axes[0, col_idx].imshow(theta_to_phase_map(history["theta"][0, hist_idx]), cmap="coolwarm", vmin=-1.0, vmax=1.0)
-        axes[0, col_idx].set_title(f"sin theta({step})")
+        axes[0, col_idx].imshow(vector_phase_to_rgb(history["theta"][0, hist_idx]))
+        axes[0, col_idx].set_title(f"theta({step}) phase")
         axes[0, col_idx].axis("off")
+        add_mask_contours(axes[0, col_idx])
 
-        axes[1, col_idx].imshow(node_vector_to_rgb_like(history["gamma"][0, hist_idx]))
-        axes[1, col_idx].set_title(f"gamma({step})")
+        axes[1, col_idx].imshow(vector_component_rgb(history["gamma"][0, hist_idx]))
+        axes[1, col_idx].set_title(f"gamma({step}) vec RGB")
         axes[1, col_idx].axis("off")
+        add_mask_contours(axes[1, col_idx])
 
-        axes[2, col_idx].imshow(spike_to_map(history["spikes"][0, hist_idx]), cmap="hot", vmin=0.0, vmax=1.0)
-        axes[2, col_idx].set_title(f"spike({step})")
+        axes[2, col_idx].imshow(vector_phase_to_rgb(history["gamma"][0, hist_idx]))
+        axes[2, col_idx].set_title(f"gamma({step}) phase")
         axes[2, col_idx].axis("off")
+        add_mask_contours(axes[2, col_idx])
 
-    fig.suptitle("Scheduled Kuramoto -> Gamma -> Spike", y=1.02)
+        axes[3, col_idx].imshow(vector_agreement_map(history["theta"][0, hist_idx]), cmap="viridis", vmin=0.0, vmax=1.0)
+        axes[3, col_idx].set_title(f"theta({step}) RGB sync")
+        axes[3, col_idx].axis("off")
+        add_mask_contours(axes[3, col_idx])
+
+        axes[4, col_idx].imshow(spike_to_map(history["spikes"][0, hist_idx]), cmap="magma", vmin=0.0, vmax=1.0)
+        axes[4, col_idx].set_title(f"spike({step})")
+        axes[4, col_idx].axis("off")
+        add_mask_contours(axes[4, col_idx])
+
+    fig.suptitle("Scheduled Kuramoto -> Gamma -> Spike (interpretable oscillator maps)", y=1.01)
     fig.tight_layout()
     return fig

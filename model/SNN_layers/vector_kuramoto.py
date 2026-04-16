@@ -27,6 +27,8 @@ class VectorKuramoto(nn.Module):
         feedback_affinity_scale: float = 0.25,
         feedback_alpha_scale: float = 0.25,
         alpha_scale: float = 1.0,
+        fixed_alpha_during_training: bool = True,
+        fixed_alpha_value: float = 0.0,
         coupling_chunk_size: int = 256,
         input_channels: int = 3,
         channel_wise_coupling: bool = True,
@@ -46,6 +48,8 @@ class VectorKuramoto(nn.Module):
         self.feedback_affinity_scale = feedback_affinity_scale
         self.feedback_alpha_scale = feedback_alpha_scale
         self.alpha_scale = alpha_scale
+        self.fixed_alpha_during_training = fixed_alpha_during_training
+        self.fixed_alpha_value = fixed_alpha_value
         self.coupling_chunk_size = coupling_chunk_size
         self.input_channels = input_channels
         self.channel_wise_coupling = channel_wise_coupling
@@ -74,7 +78,10 @@ class VectorKuramoto(nn.Module):
             spike_i = feedback_spikes[:, start:end].unsqueeze(2)
             normalized_delta = torch.abs(spike_i - spike_j) / spike_range.unsqueeze(-1)
             affinity = self.feedback_affinity_scale * (1.0 - normalized_delta)
-            alpha = self.feedback_alpha_scale * self.alpha_scale * normalized_delta
+            if self.training and self.fixed_alpha_during_training:
+                alpha = torch.full_like(normalized_delta, float(self.fixed_alpha_value))
+            else:
+                alpha = self.feedback_alpha_scale * self.alpha_scale * normalized_delta
             phase_term = torch.sin(theta_j - theta_i - alpha.unsqueeze(-1))
             chunk = (self.coupling / float(n)) * torch.sum(affinity.unsqueeze(-1) * phase_term, dim=2)
             chunks.append(chunk)
@@ -120,7 +127,10 @@ class VectorKuramoto(nn.Module):
             end = min(start + chunk_size, n)
             theta_i = theta_prev[:, start:end].unsqueeze(2)
             affinity_chunk = affinity[:, start:end]
-            alpha_chunk = alpha_t[:, start:end]
+            if self.training and self.fixed_alpha_during_training:
+                alpha_chunk = torch.full_like(alpha_t[:, start:end], float(self.fixed_alpha_value))
+            else:
+                alpha_chunk = alpha_t[:, start:end]
             phase_term = torch.sin(theta_j - theta_i - alpha_chunk.unsqueeze(-1))
             chunk = (self.coupling / float(n)) * torch.sum(affinity_chunk.unsqueeze(-1) * phase_term, dim=2)
             chunks.append(chunk)
@@ -161,8 +171,10 @@ class VectorKuramoto(nn.Module):
         # Total time derivative of the oscillator state.
         theta_dot = drive_term + coupling_term
 
-        # Euler update.
-        return theta_prev + self.dt * theta_dot
+        # Euler update followed by vector normalization, keeping oscillator
+        # states on the unit sphere as in vector/Kuramoto-style AKOrN dynamics.
+        theta_next = theta_prev + self.dt * theta_dot
+        return torch.nn.functional.normalize(theta_next, dim=-1, eps=1e-6)
 
 
 class GraphVectorKuramoto(nn.Module):
@@ -184,6 +196,8 @@ class GraphVectorKuramoto(nn.Module):
         feedback_affinity_scale: float = 0.25,
         feedback_alpha_scale: float = 0.25,
         alpha_scale: float = 1.0,
+        fixed_alpha_during_training: bool = True,
+        fixed_alpha_value: float = 0.0,
         coupling_chunk_size: int = 256,
         input_channels: int = 3,
         channel_wise_coupling: bool = True,
@@ -198,6 +212,8 @@ class GraphVectorKuramoto(nn.Module):
             feedback_affinity_scale=feedback_affinity_scale,
             feedback_alpha_scale=feedback_alpha_scale,
             alpha_scale=alpha_scale,
+            fixed_alpha_during_training=fixed_alpha_during_training,
+            fixed_alpha_value=fixed_alpha_value,
             coupling_chunk_size=coupling_chunk_size,
             input_channels=input_channels,
             channel_wise_coupling=channel_wise_coupling,

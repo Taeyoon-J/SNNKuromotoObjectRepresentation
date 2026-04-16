@@ -38,7 +38,23 @@ class TopDownPathway(nn.Module):
         self.osc_dim = config.osc_dim
 
         # Input is used only to seed gamma(0), not to initialize theta(0).
-        self.gamma_initializer = nn.Linear(1, config.osc_dim)
+        # A small trainable CNN extracts channel-aware image features. Its last
+        # layer produces C * D channels so each RGB pixel-channel oscillator
+        # receives its own D-dimensional gamma vector instead of copying one
+        # pixel-level vector across R/G/B.
+        self.gamma_encoder = nn.Sequential(
+            nn.Conv2d(config.input_channels, config.gamma_encoder_hidden, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(config.gamma_encoder_hidden, config.gamma_encoder_hidden, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(config.gamma_encoder_hidden, config.input_channels * config.osc_dim, kernel_size=1),
+        )
+        self.gamma_encoder_skip = nn.Conv2d(
+            config.input_channels,
+            config.input_channels * config.osc_dim,
+            kernel_size=1,
+            bias=False,
+        )
         # Lets the current oscillator state influence the next gamma signal.
         self.gamma_readout = nn.Linear(config.osc_dim, config.osc_dim)
         # Per-node scaling for gamma.
@@ -54,6 +70,8 @@ class TopDownPathway(nn.Module):
             feedback_affinity_scale=config.feedback_affinity_scale,
             feedback_alpha_scale=config.feedback_alpha_scale,
             alpha_scale=config.alpha_scale,
+            fixed_alpha_during_training=config.fixed_alpha_during_training,
+            fixed_alpha_value=config.fixed_alpha_value,
             coupling_chunk_size=config.coupling_chunk_size,
             input_channels=config.input_channels,
             channel_wise_coupling=config.channel_wise_coupling,
@@ -62,9 +80,23 @@ class TopDownPathway(nn.Module):
     def reset_gamma_parameters(self) -> None:
         """Initialize gamma readout so image/object contrast survives early steps."""
         with torch.no_grad():
-            # Monotonic image -> gamma(0): brighter input produces larger gamma.
-            self.gamma_initializer.weight.fill_(1.0)
-            self.gamma_initializer.bias.zero_()
+            # Small non-zero CNN initialization lets the encoder actually learn.
+            # An all-zero multi-layer CNN would make early-layer gradients weak.
+            for module in self.gamma_encoder:
+                if isinstance(module, nn.Conv2d):
+                    nn.init.kaiming_normal_(module.weight, nonlinearity="linear")
+                    module.weight.mul_(0.05)
+                    if module.bias is not None:
+                        module.bias.zero_()
+
+            # Channel-preserving residual path. If enabled, red only seeds red
+            # oscillator vectors, green only green, and blue only blue. We write
+            # the raw channel value into vector dimension 0; the CNN can learn
+            # richer dimensions on top.
+            self.gamma_encoder_skip.weight.zero_()
+            for channel_idx in range(self.config.input_channels):
+                out_idx = channel_idx * self.config.osc_dim
+                self.gamma_encoder_skip.weight[out_idx, channel_idx, 0, 0] = 1.0
 
             # Start theta -> gamma as identity instead of a random mixing.
             self.gamma_readout.weight.zero_()
@@ -73,6 +105,39 @@ class TopDownPathway(nn.Module):
             self.gamma_readout.weight[:identity_dim, :identity_dim].copy_(torch.eye(identity_dim))
 
             self.gamma_gain.fill_(1.0)
+
+    def encode_input_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Convert an RGB image into CNN feature vectors for gamma(0).
+
+        Returns:
+            Tensor with shape [B, H*W*C, D]. Each pixel-channel oscillator keeps
+            its own D-dimensional feature vector, preserving RGB-channel value
+            identity before flattening.
+        """
+        self.validate_input(x)
+        b, h, w, c = x.shape
+
+        # Work in BCHW format for convolution. By default the CNN sees raw
+        # pixels. A blur kernel can be enabled from the config for diagnostics.
+        x_bchw = x.permute(0, 3, 1, 2)
+        blur_kernel = int(self.config.gamma_encoder_blur_kernel)
+        if blur_kernel > 1:
+            if blur_kernel % 2 == 0:
+                raise ValueError("gamma_encoder_blur_kernel must be odd or 1")
+            encoder_input = F.avg_pool2d(x_bchw, kernel_size=blur_kernel, stride=1, padding=blur_kernel // 2)
+        else:
+            encoder_input = x_bchw
+        skip_scale = float(self.config.gamma_encoder_skip_scale)
+        feature_map = self.gamma_encoder(encoder_input)
+        if skip_scale != 0.0:
+            feature_map = feature_map + skip_scale * self.gamma_encoder_skip(encoder_input)
+
+        # [B, C*D, H, W] -> [B, H, W, C, D] -> [B, H*W*C, D].
+        # This matches theta_{x,y,z}: one oscillator node per pixel-channel.
+        channel_features = feature_map.view(b, c, self.osc_dim, h, w)
+        channel_features = channel_features.permute(0, 3, 4, 1, 2).contiguous()
+        return channel_features.view(b, h * w * c, self.osc_dim)
 
     def validate_input(self, x: torch.Tensor) -> None:
         """Validate the input shape without using it to initialize oscillators."""
@@ -90,26 +155,43 @@ class TopDownPathway(nn.Module):
         Each pixel-channel entry becomes one oscillator node, but this input
         drive is used only for the initial readout seed.
         """
+        encoded_input = self.encode_input_features(x) * self.gamma_gain
+        gamma_direction = F.normalize(encoded_input, dim=-1, eps=1e-6)
+        return gamma_direction * self.gamma_value_amplitude(x)
+
+    def gamma_value_amplitude(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Return the per-node RGB value amplitude used to preserve image contrast.
+
+        Shape: [B, H*W*C, 1]. If disabled, every node receives amplitude 1,
+        which recovers the pure unit-vector gamma behavior.
+        """
         self.validate_input(x)
         b, h, w, c = x.shape
-        flat_input = x.reshape(b, h * w * c, 1)
-        gamma0 = self.gamma_initializer(flat_input)
-        return self.activation_function(torch.abs(gamma0) * self.gamma_gain)
+        if not self.config.preserve_gamma_value_amplitude:
+            return torch.ones(b, h * w * c, 1, device=x.device, dtype=x.dtype)
+        amplitude = x.reshape(b, h * w * c, 1)
+        value_floor = float(self.config.gamma_value_floor)
+        if value_floor > 0.0:
+            amplitude = amplitude.clamp_min(value_floor)
+        return amplitude
 
     def activation_function(self, x: torch.Tensor) -> torch.Tensor:
         """Nonlinear activation g used in the gamma/readout stage."""
         return torch.tanh(x)
 
-    def readout_gamma_function(self, theta_state: torch.Tensor) -> torch.Tensor:
+    def readout_gamma_function(self, theta_state: torch.Tensor, value_amplitude: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Build gamma(t), the control/readout signal that drives oscillator updates.
 
         Gamma is defined from the oscillator state itself, not from an input
         encoding used to initialize oscillators.
         """
-        theta_proj = self.gamma_readout(theta_state)
-        return self.activation_function(torch.abs(theta_proj * self.gamma_gain))
-        # return self.activation_function(torch.abs(theta_proj) * self.gamma_gain)
+        theta_proj = self.gamma_readout(theta_state) * self.gamma_gain
+        gamma_direction = F.normalize(theta_proj, dim=-1, eps=1e-6)
+        if value_amplitude is None:
+            return gamma_direction
+        return gamma_direction * value_amplitude
     
 
     def sinusoidal_gating_function(self, theta_delayed: torch.Tensor) -> torch.Tensor:
@@ -118,10 +200,14 @@ class TopDownPathway(nn.Module):
 
         This is the bridge from Kuramoto dynamics to the SNN input modulation.
         """
-        # Compress vector oscillator dimension D to one scalar phase per
-        # pixel-channel oscillator: [B, H*W*C, D] -> [B, H*W*C, 1].
-        theta_scalar = theta_delayed.mean(dim=-1, keepdim=True)
-        return 0.5 * (1.0 + torch.sin(theta_scalar))
+        # For vector oscillators, the scalar phase should come from the vector
+        # direction, not from averaging vector components. Averaging a unit
+        # vector can collapse toward zero and make the gate nearly constant.
+        if theta_delayed.shape[-1] >= 2:
+            theta_phase = torch.atan2(theta_delayed[..., 1:2], theta_delayed[..., 0:1])
+        else:
+            theta_phase = theta_delayed
+        return 0.5 * (1.0 + torch.sin(theta_phase))
 
     def top_down_feedback_function(self, spikes: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
@@ -358,13 +444,16 @@ class ObjectRepresentationSNN(nn.Module):
         batch_size = x.shape[0]
         device = x.device
 
-        # Initialize oscillator states randomly instead of encoding the image.
-        theta = (2.0 * torch.pi) * torch.rand(
+        # Initialize oscillator states as random unit vectors, matching the
+        # AKOrN-style view of each oscillator as a vector phase on a sphere.
+        theta = torch.randn(
             batch_size,
             self.num_nodes,
             self.config.osc_dim,
             device=device,
-        ) - torch.pi
+        )
+        theta = F.normalize(theta, dim=-1, eps=1e-6)
+        gamma_amplitude = self.top_down.gamma_value_amplitude(x)
         gamma = self.top_down.initialize_gamma_from_input(x)
         gate = torch.zeros(batch_size, self.num_nodes, 1, device=device)
         membrane = torch.zeros(batch_size, self.bottom_up.num_pixels, device=device)
@@ -397,7 +486,7 @@ class ObjectRepresentationSNN(nn.Module):
 
             # 2. Gamma refreshes every scheduled interval.
             if step_idx % interval == 0:
-                gamma = self.top_down.readout_gamma_function(theta)
+                gamma = self.top_down.readout_gamma_function(theta, gamma_amplitude)
                 gate = self.top_down.build_gate_from_history(theta_delay_buffer, theta)
 
             # 3. Spike can update either at the gamma step or one step later.
@@ -421,8 +510,10 @@ class ObjectRepresentationSNN(nn.Module):
                 gate_hist.append(gate)
                 membrane_hist.append(membrane)
                 if return_pairwise_history:
-                    affinity_hist.append(affinity)
-                    alpha_hist.append(alpha)
+                    if affinity is not None:
+                        affinity_hist.append(affinity)
+                    if alpha is not None:
+                        alpha_hist.append(alpha)
 
         # Stack spikes over time to obtain a [B, T, N] spike trace.
         spike_trace = torch.stack(spike_hist, dim=1)
@@ -441,8 +532,10 @@ class ObjectRepresentationSNN(nn.Module):
                 "spikes": spike_trace,
             }
             if return_pairwise_history:
-                history["affinity"] = torch.stack(affinity_hist, dim=1)
-                history["alpha"] = torch.stack(alpha_hist, dim=1)
+                if affinity_hist:
+                    history["affinity"] = torch.stack(affinity_hist, dim=1)
+                if alpha_hist:
+                    history["alpha"] = torch.stack(alpha_hist, dim=1)
         elif return_spike_trace:
             history = {"spikes": spike_trace}
         return logits, history if (return_history or return_spike_trace) else {}
