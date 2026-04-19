@@ -52,6 +52,7 @@ class ObjectRepresentationConfig:
     object_density_weight: float = 1.0
     between_object_distance_weight: float = 1.0
     background_suppression_weight: float = 3.0
+    object_coverage_weight: float = 1.0
     # Minimum desired peak object activity and temporal scale for separation.
     object_density_target: float = 0.6
     object_time_distance_scale: float = 10.0
@@ -71,6 +72,12 @@ class ObjectRepresentationConfig:
     # Attraction strength k_i toward the encoder/readout drive gamma.
     # In the current simplified implementation we use one shared scalar value.
     attraction_strength: float = 3.0
+    # Optional schedule for the gamma attraction. "constant" keeps the old
+    # behavior. "linear_decay" starts at attraction_strength and linearly moves
+    # toward attraction_strength_end over attraction_strength_decay_steps.
+    attraction_strength_schedule: str = "constant"
+    attraction_strength_end: float = 3.0
+    attraction_strength_decay_steps: int = 30
 
     # Membrane potential carry-over in the SNN update.
     membrane_decay: float = 0.92
@@ -150,6 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--object_density_weight", type=float, default=1.0)
     parser.add_argument("--between_object_distance_weight", type=float, default=1.0)
     parser.add_argument("--background_suppression_weight", type=float, default=3.0)
+    parser.add_argument("--object_coverage_weight", type=float, default=1.0)
     parser.add_argument("--object_density_target", type=float, default=0.6)
     parser.add_argument("--object_time_distance_scale", type=float, default=10.0)
     parser.add_argument("--dt", type=float, default=0.15)
@@ -157,6 +165,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--coupling_chunk_size", type=int, default=256)
     parser.add_argument("--channel_wise_coupling", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--attraction_strength", type=float, default=3.0)
+    parser.add_argument("--attraction_strength_schedule", type=str, default="constant", choices=["constant", "linear_decay"])
+    parser.add_argument("--attraction_strength_end", type=float, default=3.0)
+    parser.add_argument("--attraction_strength_decay_steps", type=int, default=30)
     parser.add_argument("--membrane_decay", type=float, default=0.92)
     parser.add_argument("--recurrent_scale", type=float, default=1.0)
     parser.add_argument("--threshold", type=float, default=0.6)

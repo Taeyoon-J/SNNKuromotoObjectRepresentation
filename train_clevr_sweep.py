@@ -59,13 +59,19 @@ def build_config(
         epochs=args.epochs,
         lr=args.lr,
         weight_decay=args.weight_decay,
+        dt=args.dt,
         coupling=args.coupling,
         attraction_strength=args.attraction_strength,
+        attraction_strength_schedule=args.attraction_strength_schedule,
+        attraction_strength_end=args.attraction_strength_end,
+        attraction_strength_decay_steps=args.attraction_strength_decay_steps,
+        recurrent_scale=args.recurrent_scale,
         coupling_chunk_size=args.coupling_chunk_size,
         channel_wise_coupling=args.channel_wise_coupling,
         fixed_alpha_during_training=args.fixed_alpha_during_training,
         fixed_alpha_value=args.fixed_alpha_value,
         background_suppression_weight=args.background_suppression_weight,
+        object_coverage_weight=args.object_coverage_weight,
         gamma_encoder_hidden=args.gamma_encoder_hidden,
         gamma_encoder_blur_kernel=args.gamma_encoder_blur_kernel,
         gamma_encoder_skip_scale=args.gamma_encoder_skip_scale,
@@ -482,6 +488,19 @@ def run_one_experiment(
         "loss_function": loss_name,
         "feedback_affinity_scale": feedback_magnitude,
         "feedback_alpha_scale": feedback_magnitude,
+        "dt": args.dt,
+        "coupling": args.coupling,
+        "attraction_strength": args.attraction_strength,
+        "attraction_strength_schedule": args.attraction_strength_schedule,
+        "attraction_strength_end": args.attraction_strength_end,
+        "attraction_strength_decay_steps": args.attraction_strength_decay_steps,
+        "fixed_alpha_value": args.fixed_alpha_value,
+        "gamma_value_floor": args.gamma_value_floor,
+        "gamma_encoder_skip_scale": args.gamma_encoder_skip_scale,
+        "background_suppression_weight": args.background_suppression_weight,
+        "object_coverage_weight": args.object_coverage_weight,
+        "score_quantile": args.score_quantile,
+        "min_pixels": args.min_pixels,
         "epochs": args.epochs,
         "train_samples": len(train_dataset),
         "test_samples": len(test_dataset),
@@ -551,13 +570,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--grad_clip", type=float, default=1.0)
+    parser.add_argument("--dt", type=float, default=0.15)
     parser.add_argument("--coupling", type=float, default=1.0)
     parser.add_argument("--attraction_strength", type=float, default=3.0)
+    parser.add_argument("--attraction_strength_schedule", type=str, default="constant", choices=["constant", "linear_decay"])
+    parser.add_argument("--attraction_strength_end", type=float, default=3.0)
+    parser.add_argument("--attraction_strength_decay_steps", type=int, default=30)
+    parser.add_argument("--recurrent_scale", type=float, default=1.0)
     parser.add_argument("--coupling_chunk_size", type=int, default=128)
     parser.add_argument("--channel_wise_coupling", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--fixed_alpha_during_training", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--fixed_alpha_value", type=float, default=0.0)
     parser.add_argument("--background_suppression_weight", type=float, default=3.0)
+    parser.add_argument("--object_coverage_weight", type=float, default=1.0)
     parser.add_argument("--gamma_encoder_hidden", type=int, default=16)
     parser.add_argument("--gamma_encoder_blur_kernel", type=int, default=1)
     parser.add_argument("--gamma_encoder_skip_scale", type=float, default=0.10)

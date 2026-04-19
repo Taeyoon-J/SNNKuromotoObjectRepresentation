@@ -24,6 +24,9 @@ class VectorKuramoto(nn.Module):
         coupling: float = 1.0,
         dt: float = 1.0,
         attraction_strength: float = 1.0,
+        attraction_strength_schedule: str = "constant",
+        attraction_strength_end: float = 1.0,
+        attraction_strength_decay_steps: int = 30,
         feedback_affinity_scale: float = 0.25,
         feedback_alpha_scale: float = 0.25,
         alpha_scale: float = 1.0,
@@ -44,6 +47,9 @@ class VectorKuramoto(nn.Module):
         self.dt = dt
         # Shared attraction strength k_i toward the previous encoder drive.
         self.attraction_strength = attraction_strength
+        self.attraction_strength_schedule = attraction_strength_schedule
+        self.attraction_strength_end = attraction_strength_end
+        self.attraction_strength_decay_steps = attraction_strength_decay_steps
         # Feedback scales used when pairwise terms are generated from spikes.
         self.feedback_affinity_scale = feedback_affinity_scale
         self.feedback_alpha_scale = feedback_alpha_scale
@@ -53,6 +59,18 @@ class VectorKuramoto(nn.Module):
         self.coupling_chunk_size = coupling_chunk_size
         self.input_channels = input_channels
         self.channel_wise_coupling = channel_wise_coupling
+
+    def current_attraction_strength(self, step_idx: Optional[int] = None) -> float:
+        """Return the gamma attraction strength for the current recurrent step."""
+        if self.attraction_strength_schedule == "constant" or step_idx is None:
+            return float(self.attraction_strength)
+        if self.attraction_strength_schedule != "linear_decay":
+            raise ValueError(f"Unknown attraction strength schedule: {self.attraction_strength_schedule}")
+        decay_steps = max(1, int(self.attraction_strength_decay_steps))
+        progress = min(max(float(step_idx - 1) / float(decay_steps), 0.0), 1.0)
+        start = float(self.attraction_strength)
+        end = float(self.attraction_strength_end)
+        return start + progress * (end - start)
 
     def _feedback_pairwise_coupling(self, theta_prev: torch.Tensor, feedback_spikes: torch.Tensor) -> torch.Tensor:
         """
@@ -116,6 +134,7 @@ class VectorKuramoto(nn.Module):
         theta_prev: torch.Tensor,
         affinity: Optional[torch.Tensor],
         alpha_t: Optional[torch.Tensor],
+        step_idx: Optional[int] = None,
     ) -> torch.Tensor:
         """Fallback chunked coupling for callers that still pass full matrices."""
         _, n, _ = theta_prev.shape
@@ -143,6 +162,7 @@ class VectorKuramoto(nn.Module):
         gamma_prev: torch.Tensor,
         affinity: Optional[torch.Tensor],
         alpha_t: Optional[torch.Tensor],
+        step_idx: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Advance the vector Kuramoto system by one step.
@@ -168,7 +188,8 @@ class VectorKuramoto(nn.Module):
             raise ValueError("affinity must be None, [B, N] feedback spikes, or [B, N, N] with alpha_t")
 
         # External sensory/control drive pushes the oscillator toward gamma(t-1).
-        drive_term = self.attraction_strength * (gamma_prev - theta_prev)
+        attraction_strength = self.current_attraction_strength(step_idx)
+        drive_term = attraction_strength * (gamma_prev - theta_prev)
 
         # Total time derivative of the oscillator state.
         theta_dot = drive_term + coupling_term
@@ -195,6 +216,9 @@ class GraphVectorKuramoto(nn.Module):
         coupling: float = 1.0,
         dt: float = 1.0,
         attraction_strength: float = 1.0,
+        attraction_strength_schedule: str = "constant",
+        attraction_strength_end: float = 1.0,
+        attraction_strength_decay_steps: int = 30,
         feedback_affinity_scale: float = 0.25,
         feedback_alpha_scale: float = 0.25,
         alpha_scale: float = 1.0,
@@ -211,6 +235,9 @@ class GraphVectorKuramoto(nn.Module):
             coupling=coupling,
             dt=dt,
             attraction_strength=attraction_strength,
+            attraction_strength_schedule=attraction_strength_schedule,
+            attraction_strength_end=attraction_strength_end,
+            attraction_strength_decay_steps=attraction_strength_decay_steps,
             feedback_affinity_scale=feedback_affinity_scale,
             feedback_alpha_scale=feedback_alpha_scale,
             alpha_scale=alpha_scale,
@@ -227,5 +254,6 @@ class GraphVectorKuramoto(nn.Module):
         gamma_prev: torch.Tensor,
         affinity: torch.Tensor,
         alpha_t: torch.Tensor,
+        step_idx: Optional[int] = None,
     ) -> torch.Tensor:
-        return self.core(theta_prev, gamma_prev, affinity, alpha_t)
+        return self.core(theta_prev, gamma_prev, affinity, alpha_t, step_idx)

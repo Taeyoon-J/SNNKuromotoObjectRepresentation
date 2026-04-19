@@ -25,6 +25,9 @@ class GraphVectorKuramotoLayer(nn.Module):
         coupling: float,
         dt: float,
         attraction_strength: float,
+        attraction_strength_schedule: str,
+        attraction_strength_end: float,
+        attraction_strength_decay_steps: int,
         feedback_affinity_scale: float,
         feedback_alpha_scale: float,
         alpha_scale: float,
@@ -41,6 +44,9 @@ class GraphVectorKuramotoLayer(nn.Module):
             coupling=coupling,
             dt=dt,
             attraction_strength=attraction_strength,
+            attraction_strength_schedule=attraction_strength_schedule,
+            attraction_strength_end=attraction_strength_end,
+            attraction_strength_decay_steps=attraction_strength_decay_steps,
             feedback_affinity_scale=feedback_affinity_scale,
             feedback_alpha_scale=feedback_alpha_scale,
             alpha_scale=alpha_scale,
@@ -57,9 +63,10 @@ class GraphVectorKuramotoLayer(nn.Module):
         gamma_prev: torch.Tensor,
         affinity: Optional[torch.Tensor],
         alpha_t: Optional[torch.Tensor],
+        step_idx: Optional[int] = None,
     ) -> torch.Tensor:
         # Delegate the actual oscillator update to the Kuramoto layer.
-        return self.kuramoto(theta_prev, gamma_prev, affinity, alpha_t)
+        return self.kuramoto(theta_prev, gamma_prev, affinity, alpha_t, step_idx)
 
 
 class ObjectReadoutSNN(nn.Module):

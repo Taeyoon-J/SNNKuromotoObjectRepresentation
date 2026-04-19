@@ -66,6 +66,9 @@ class TopDownPathway(nn.Module):
             coupling=config.coupling,
             dt=config.dt,
             attraction_strength=config.attraction_strength,
+            attraction_strength_schedule=config.attraction_strength_schedule,
+            attraction_strength_end=config.attraction_strength_end,
+            attraction_strength_decay_steps=config.attraction_strength_decay_steps,
             feedback_affinity_scale=config.feedback_affinity_scale,
             feedback_alpha_scale=config.feedback_alpha_scale,
             alpha_scale=config.alpha_scale,
@@ -223,9 +226,10 @@ class TopDownPathway(nn.Module):
         gamma_prev: torch.Tensor,
         affinity: Optional[torch.Tensor],
         alpha: Optional[torch.Tensor],
+        step_idx: Optional[int] = None,
     ) -> torch.Tensor:
         """Advance theta by one step using the most recent gamma."""
-        return self.kuramoto(theta_prev, gamma_prev, affinity, alpha)
+        return self.kuramoto(theta_prev, gamma_prev, affinity, alpha, step_idx)
 
     def build_gate_from_history(self, theta_history: List[torch.Tensor], theta_current: torch.Tensor) -> torch.Tensor:
         """Build the sinusoidal gate only when a readout/spike update is scheduled."""
@@ -315,6 +319,9 @@ class ObjectRepresentationSNN(nn.Module):
             object_density: each object should have at least one dense activation time.
             between_distance: object activity centers should be temporally separated.
             background_suppression: background nodes should stay quiet.
+            object_coverage: every object pixel should spike at least once in
+                the late window, improving mask-shaped IoU instead of only
+                object-average activity.
         """
         late_spikes = self._late_spike_window(spike_trace)
         node_masks = self._prepare_object_masks(object_masks, late_spikes)
@@ -365,6 +372,13 @@ class ObjectRepresentationSNN(nn.Module):
         object_density_per_object = F.relu(float(self.config.object_density_target) - peak_activity)
         object_density = (object_density_per_object * object_valid).sum() / valid_object_count
 
+        # 4b. Object pixel coverage: density above only constrains the object
+        # average. IoU needs the whole mask to light up, so require each object
+        # pixel to reach the density target at least once over the late window.
+        per_object_pixel_peak = (late_spikes.unsqueeze(2) * node_masks.unsqueeze(1)).amax(dim=1)
+        coverage_error = F.relu(float(self.config.object_density_target) - per_object_pixel_peak).pow(2)
+        object_coverage = (coverage_error * node_masks).sum() / node_masks.sum().clamp_min(1.0)
+
         # 5. Background suppression, kept as an extra component for experiments.
         object_union = node_masks.amax(dim=1)
         background_mask = 1.0 - object_union
@@ -378,6 +392,7 @@ class ObjectRepresentationSNN(nn.Module):
             "object_density": object_density,
             "between_distance": between_distance,
             "background_suppression": background_suppression,
+            "object_coverage": object_coverage,
         }
 
     def unsupervised_object_loss_1234(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> torch.Tensor:
@@ -389,6 +404,7 @@ class ObjectRepresentationSNN(nn.Module):
             + self.config.object_density_weight * components["object_density"]
             + self.config.between_object_distance_weight * components["between_distance"]
             + self.config.background_suppression_weight * components["background_suppression"]
+            + self.config.object_coverage_weight * components["object_coverage"]
         )
 
     def unsupervised_object_loss_124(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> torch.Tensor:
@@ -399,6 +415,7 @@ class ObjectRepresentationSNN(nn.Module):
             + self.config.between_object_difference_weight * components["between_difference"]
             + self.config.between_object_distance_weight * components["between_distance"]
             + self.config.background_suppression_weight * components["background_suppression"]
+            + self.config.object_coverage_weight * components["object_coverage"]
         )
 
     def unsupervised_object_loss_123(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> torch.Tensor:
@@ -409,6 +426,7 @@ class ObjectRepresentationSNN(nn.Module):
             + self.config.between_object_difference_weight * components["between_difference"]
             + self.config.object_density_weight * components["object_density"]
             + self.config.background_suppression_weight * components["background_suppression"]
+            + self.config.object_coverage_weight * components["object_coverage"]
         )
 
     def build_adam_optimizer(self, lr: Optional[float] = None, weight_decay: Optional[float] = None):
@@ -480,7 +498,7 @@ class ObjectRepresentationSNN(nn.Module):
 
         for step_idx in range(1, self.config.steps + 1):
             # 1. Theta evolves every step using the most recent gamma.
-            theta = self.top_down.update_theta(theta, gamma, affinity, alpha)
+            theta = self.top_down.update_theta(theta, gamma, affinity, alpha, step_idx)
 
             # 2. Gamma refreshes every scheduled interval.
             if step_idx % interval == 0:
