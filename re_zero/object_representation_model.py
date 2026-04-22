@@ -257,7 +257,6 @@ class ObjectRepresentationSNN(nn.Module):
             device=device,
         )
         theta = F.normalize(theta, dim=-1, eps=1e-6)
-        gamma_amplitude = self.readout.gamma_value_amplitude(x)
         gamma = self.readout.initialize_gamma_from_input(x)
         theta_initial = theta
         gamma_initial = gamma
@@ -292,7 +291,7 @@ class ObjectRepresentationSNN(nn.Module):
             theta = self.kuramoto(theta, gamma, theta_connectivity_weight, alpha_t)
 
             if step_idx % interval == 0:
-                gamma = self.readout.readout_gamma_function(theta, gamma_amplitude)
+                gamma = self.readout.gamma_update(theta)
                 gate = self.gate.build_gate_from_history(theta_delay_buffer, theta, gamma)
 
             should_update_spike = (step_idx - spike_update_offset) % interval == 0

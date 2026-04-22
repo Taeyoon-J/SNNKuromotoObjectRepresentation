@@ -43,6 +43,7 @@ class ReadoutLayer(nn.Module):
 
         self.reset_gamma_parameters()
 
+    # gamma update
     def gamma_update(self, theta_state: torch.Tensor) -> torch.Tensor:
         """
         Build gamma(t) from the current oscillator state theta(t).
@@ -53,24 +54,32 @@ class ReadoutLayer(nn.Module):
         theta_proj = self.gamma_readout(theta_state)
         return self.activation_function(torch.abs(theta_proj))
 
-    def readout_gamma_function(
-        self,
-        theta_state: torch.Tensor,
-        value_amplitude: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """
-        Build gamma(t) as a normalized oscillator-drive vector.
+    # gamma_update option 2
+    # gamma = normalize((W theta + b) * gamma_gain) * value_amplitude
+    # def readout_gamma_function(
+    #     self,
+    #     theta_state: torch.Tensor,
+    #     value_amplitude: torch.Tensor | None = None,
+    # ) -> torch.Tensor:
+    #     """
+    #     Build gamma(t) as a normalized oscillator-drive vector.
+    #
+    #     This keeps the original model behavior available while `gamma_update`
+    #     remains as the simpler activation-based readout experiment.
+    #     """
+    #     theta_proj = self.gamma_readout(theta_state) * self.gamma_gain
+    #     gamma_direction = F.normalize(theta_proj, dim=-1, eps=1e-6)
+    #     if value_amplitude is None:
+    #         return gamma_direction
+    #     return gamma_direction * value_amplitude
 
-        This keeps the original model behavior available while `gamma_update`
-        remains as the simpler activation-based readout experiment.
-        """
-        theta_proj = self.gamma_readout(theta_state) * self.gamma_gain
-        gamma_direction = F.normalize(theta_proj, dim=-1, eps=1e-6)
-        if value_amplitude is None:
-            return gamma_direction
-        return gamma_direction * value_amplitude
+    def activation_function(self, x: torch.Tensor) -> torch.Tensor:
+        """Nonlinear activation used in the gamma readout stage."""
+        return torch.tanh(x)
 
-    # initialize start
+
+
+    # gamma initialization
     def initialize_gamma_from_input(self, x: torch.Tensor) -> torch.Tensor:
         """
         Build gamma(0) from the input image.
@@ -84,27 +93,6 @@ class ReadoutLayer(nn.Module):
         encoded_input = self.encode_input_features(x) * self.gamma_gain
         gamma_direction = F.normalize(encoded_input, dim=-1, eps=1e-6)
         return gamma_direction * self.gamma_value_amplitude(x)
-
-    def reset_gamma_parameters(self) -> None:
-        """Initialize the image encoder and theta-to-gamma readout."""
-        with torch.no_grad():
-            for module in self.gamma_encoder:
-                if isinstance(module, nn.Conv2d):
-                    nn.init.kaiming_normal_(module.weight, nonlinearity="linear")
-                    module.weight.mul_(0.05)
-                    if module.bias is not None:
-                        module.bias.zero_()
-
-            self.gamma_encoder_skip.weight.zero_()
-            for channel_idx in range(min(self.config.input_channels, self.osc_dim)):
-                self.gamma_encoder_skip.weight[channel_idx, channel_idx, 0, 0] = 1.0
-
-            self.gamma_readout.weight.zero_()
-            self.gamma_readout.bias.zero_()
-            identity_dim = min(self.gamma_readout.weight.shape)
-            self.gamma_readout.weight[:identity_dim, :identity_dim].copy_(torch.eye(identity_dim))
-
-            self.gamma_gain.fill_(1.0)
 
     def encode_input_features(self, x: torch.Tensor) -> torch.Tensor:
         """Convert an input image into per-oscillator gamma features."""
@@ -158,8 +146,25 @@ class ReadoutLayer(nn.Module):
                 f"Expected input shape [B, {self.config.image_height}, {self.config.image_width}, "
                 f"{self.config.input_channels}], got {tuple(x.shape)}"
             )
-    # initialize end
 
-    def activation_function(self, x: torch.Tensor) -> torch.Tensor:
-        """Nonlinear activation used in the gamma readout stage."""
-        return torch.tanh(x)
+    def reset_gamma_parameters(self) -> None:
+        """Initialize the image encoder and theta-to-gamma readout."""
+        with torch.no_grad():
+            for module in self.gamma_encoder:
+                if isinstance(module, nn.Conv2d):
+                    nn.init.kaiming_normal_(module.weight, nonlinearity="linear")
+                    module.weight.mul_(0.05)
+                    if module.bias is not None:
+                        module.bias.zero_()
+
+            self.gamma_encoder_skip.weight.zero_()
+            for channel_idx in range(min(self.config.input_channels, self.osc_dim)):
+                self.gamma_encoder_skip.weight[channel_idx, channel_idx, 0, 0] = 1.0
+
+            self.gamma_readout.weight.zero_()
+            self.gamma_readout.bias.zero_()
+            identity_dim = min(self.gamma_readout.weight.shape)
+            self.gamma_readout.weight[:identity_dim, :identity_dim].copy_(torch.eye(identity_dim))
+
+            self.gamma_gain.fill_(1.0)
+
