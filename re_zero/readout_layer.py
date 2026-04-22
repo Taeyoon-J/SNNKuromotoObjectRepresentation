@@ -53,6 +53,23 @@ class ReadoutLayer(nn.Module):
         theta_proj = self.gamma_readout(theta_state)
         return self.activation_function(torch.abs(theta_proj))
 
+    def readout_gamma_function(
+        self,
+        theta_state: torch.Tensor,
+        value_amplitude: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Build gamma(t) as a normalized oscillator-drive vector.
+
+        This keeps the original model behavior available while `gamma_update`
+        remains as the simpler activation-based readout experiment.
+        """
+        theta_proj = self.gamma_readout(theta_state) * self.gamma_gain
+        gamma_direction = F.normalize(theta_proj, dim=-1, eps=1e-6)
+        if value_amplitude is None:
+            return gamma_direction
+        return gamma_direction * value_amplitude
+
     # initialize start
     def initialize_gamma_from_input(self, x: torch.Tensor) -> torch.Tensor:
         """

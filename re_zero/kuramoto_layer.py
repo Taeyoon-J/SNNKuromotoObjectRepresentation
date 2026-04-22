@@ -11,8 +11,8 @@ class KuramotoLayer(nn.Module):
 
     Each node carries an oscillator vector with dimension `osc_dim`. The state
     is updated by combining an attraction term toward `gamma_prev` with a
-    pairwise coupling term derived from explicit pixel-pair affinity and
-    phase-lag matrices.
+    pairwise coupling term derived from explicit pixel-pair theta connectivity
+    weights and phase-lag matrices.
     """
 
     def __init__(
@@ -40,10 +40,10 @@ class KuramotoLayer(nn.Module):
         self,
         theta_prev: torch.Tensor,
         gamma_prev: torch.Tensor,
-        affinity: torch.Tensor,
+        theta_connectivity_weight: torch.Tensor,
         alpha_t: torch.Tensor,
     ) -> torch.Tensor:
-        coupling_term = self.compute_coupling_term(theta_prev, affinity, alpha_t)
+        coupling_term = self.compute_coupling_term(theta_prev, theta_connectivity_weight, alpha_t)
         drive_term = self.gamma_attraction_strength * (gamma_prev - theta_prev)
         theta_dot = drive_term + coupling_term
         theta_next = theta_prev + self.step_size * theta_dot
@@ -52,24 +52,24 @@ class KuramotoLayer(nn.Module):
     def compute_coupling_term(
         self,
         theta_prev: torch.Tensor,
-        affinity: torch.Tensor,
+        theta_connectivity_weight: torch.Tensor,
         alpha_t: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute chunked coupling from fixed [B, N, N] affinity matrices."""
+        """Compute chunked Kuramoto coupling from fixed [B, N, N] matrices."""
         if float(self.global_coupling_strength) == 0.0:
             return torch.zeros_like(theta_prev)
 
         _, num_oscillators, _ = theta_prev.shape
         chunks = []
-        for theta_i, theta_j, affinity_chunk, alpha_chunk in self.seperate_chunks(
+        for theta_i, theta_j, theta_connectivity_weight_chunk, alpha_chunk in self.seperate_chunks(
             theta_prev,
-            affinity,
+            theta_connectivity_weight,
             alpha_t,
         ):
             phase_term = torch.sin(theta_j - theta_i - alpha_chunk.unsqueeze(-1))
             chunks.append(
                 (self.global_coupling_strength / float(num_oscillators)) * torch.sum(
-                    affinity_chunk.unsqueeze(-1) * phase_term,
+                    theta_connectivity_weight_chunk.unsqueeze(-1) * phase_term,
                     dim=2,
                 )
             )
@@ -79,7 +79,7 @@ class KuramotoLayer(nn.Module):
     def seperate_chunks(
         self,
         theta_prev: torch.Tensor,
-        affinity: torch.Tensor,
+        theta_connectivity_weight: torch.Tensor,
         alpha_t: torch.Tensor,
     ):
         """Prepare chunked tensors for coupling computation."""
@@ -90,11 +90,11 @@ class KuramotoLayer(nn.Module):
         for start in range(0, num_oscillators, chunk_size):
             end = min(start + chunk_size, num_oscillators)
             theta_i = theta_prev[:, start:end].unsqueeze(2)
-            affinity_chunk = affinity[:, start:end]
+            theta_connectivity_weight_chunk = theta_connectivity_weight[:, start:end]
 
             if self.training and self.fixed_alpha_during_training:
                 alpha_chunk = torch.full_like(alpha_t[:, start:end], float(self.fixed_alpha_value))
             else:
                 alpha_chunk = alpha_t[:, start:end]
 
-            yield theta_i, theta_j, affinity_chunk, alpha_chunk
+            yield theta_i, theta_j, theta_connectivity_weight_chunk, alpha_chunk

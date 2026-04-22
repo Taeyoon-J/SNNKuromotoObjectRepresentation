@@ -15,19 +15,25 @@ Example:
 #
 # Use this block when debugging shape mismatches among:
 # - `theta_prev` with shape [B, N, D]
-# - `affinity` with shape [B, N, N]
+# - `theta_connectivity_weight` with shape [B, N, N]
 # - `alpha_t` with shape [B, N, N]
 #
-# if affinity.dim() != 3:
-#     raise ValueError(f"affinity must have shape [B, N, N], got {tuple(affinity.shape)}")
+# if theta_connectivity_weight.dim() != 3:
+#     raise ValueError(
+#         "theta_connectivity_weight must have shape [B, N, N], "
+#         f"got {tuple(theta_connectivity_weight.shape)}"
+#     )
 # if alpha_t.dim() != 3:
 #     raise ValueError(f"alpha_t must have shape [B, N, N], got {tuple(alpha_t.shape)}")
-# if affinity.shape[:2] != (theta_prev.shape[0], theta_prev.shape[1]) or affinity.shape[2] != theta_prev.shape[1]:
+# if (
+#     theta_connectivity_weight.shape[:2] != (theta_prev.shape[0], theta_prev.shape[1])
+#     or theta_connectivity_weight.shape[2] != theta_prev.shape[1]
+# ):
 #     raise ValueError(
-#         "affinity must align with theta_prev and have shape [B, N, N]"
+#         "theta_connectivity_weight must align with theta_prev and have shape [B, N, N]"
 #     )
-# if alpha_t.shape != affinity.shape:
-#     raise ValueError("alpha_t must have the same shape as affinity")
+# if alpha_t.shape != theta_connectivity_weight.shape:
+#     raise ValueError("alpha_t must have the same shape as theta_connectivity_weight")
 
 
 # Original CNN-based initialize_gamma_from_input path for `ReadoutLayer`

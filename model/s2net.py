@@ -28,7 +28,7 @@ class TopDownPathway(nn.Module):
     3. Update the Kuramoto state.
     4. Build gamma(t>0) from theta(t) only at scheduled readout steps.
     5. Generate delayed sinusoidal gates when readout/spike updates happen.
-    6. Build feedback-derived affinity and phase lag terms.
+    6. Build feedback-derived theta connectivity and phase lag terms.
     """
 
     def __init__(self, config: ObjectRepresentationConfig) -> None:
@@ -66,7 +66,7 @@ class TopDownPathway(nn.Module):
             coupling=config.coupling,
             dt=config.dt,
             attraction_strength=config.attraction_strength,
-            feedback_affinity_scale=config.feedback_affinity_scale,
+            feedback_theta_connectivity_weight_scale=config.feedback_theta_connectivity_weight_scale,
             feedback_alpha_scale=config.feedback_alpha_scale,
             alpha_scale=config.alpha_scale,
             fixed_alpha_during_training=config.fixed_alpha_during_training,
@@ -204,28 +204,41 @@ class TopDownPathway(nn.Module):
             theta_phase = theta_delayed
         return 0.5 * (1.0 + torch.sin(theta_phase))
 
-    def top_down_feedback_function(self, spikes: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def top_down_feedback_function(self, spikes: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Return compact feedback state for pairwise affinity/phase-lag generation.
+        Build pairwise theta connectivity and phase-lag matrices from spikes.
 
-        The Kuramoto layer expands this spike vector into pairwise terms in
-        chunks, avoiding a persistent [B, N, N] matrix for 64x64x3 inputs.
+        Returns:
+            theta_connectivity_weight: [B, N, N]
+            alpha_t: [B, N, N]
         """
         if spikes.shape[-1] == self.num_nodes:
-            feedback_spikes = spikes
+            spike_i = spikes.unsqueeze(2)
+            spike_j = spikes.unsqueeze(1)
+            spike_range = (
+                spikes.amax(dim=1, keepdim=True) - spikes.amin(dim=1, keepdim=True)
+            ).clamp_min(1e-6)
+            normalized_delta = torch.abs(spike_i - spike_j) / spike_range.unsqueeze(-1)
+            theta_connectivity_weight = (
+                self.config.feedback_theta_connectivity_weight_scale * (1.0 - normalized_delta)
+            )
+            if self.training and self.config.fixed_alpha_during_training:
+                alpha_t = torch.full_like(normalized_delta, float(self.config.fixed_alpha_value))
+            else:
+                alpha_t = self.config.feedback_alpha_scale * self.config.alpha_scale * normalized_delta
         else:
             raise ValueError(f"Expected pixel-level spikes with {self.num_nodes} nodes, got {spikes.shape[-1]}")
-        return feedback_spikes, None
+        return theta_connectivity_weight, alpha_t
 
     def update_theta(
         self,
         theta_prev: torch.Tensor,
         gamma_prev: torch.Tensor,
-        affinity: Optional[torch.Tensor],
-        alpha: Optional[torch.Tensor],
+        theta_connectivity_weight: torch.Tensor,
+        alpha_t: torch.Tensor,
     ) -> torch.Tensor:
         """Advance theta by one step using the most recent gamma."""
-        return self.kuramoto(theta_prev, gamma_prev, affinity, alpha)
+        return self.kuramoto(theta_prev, gamma_prev, theta_connectivity_weight, alpha_t)
 
     def build_gate_from_history(self, theta_history: List[torch.Tensor], theta_current: torch.Tensor) -> torch.Tensor:
         """Build the sinusoidal gate only when a readout/spike update is scheduled."""
@@ -433,7 +446,7 @@ class ObjectRepresentationSNN(nn.Module):
             x: Input images, shape [B, H, W, C]
             return_history: Whether to keep intermediate states for analysis
             return_spike_trace: Whether to return spikes without full theta/gamma history
-            return_pairwise_history: Whether to store large affinity/alpha matrices
+            return_pairwise_history: Whether to store large theta connectivity/alpha matrices
         """
         # Input is used only to initialize gamma(0); theta(0) remains random.
         self.top_down.validate_input(x)
@@ -457,11 +470,8 @@ class ObjectRepresentationSNN(nn.Module):
         membrane = torch.zeros(batch_size, self.bottom_up.num_pixels, device=device)
         spikes = torch.zeros(batch_size, self.bottom_up.num_pixels, device=device)
 
-        # No initial pairwise feedback. The old identity affinity produced zero
-        # coupling anyway because sin(theta_i - theta_i) = 0, but it allocated a
-        # huge [N, N] matrix for 64x64 inputs.
-        affinity = None
-        alpha = None
+        theta_connectivity_weight = torch.zeros(batch_size, self.num_nodes, self.num_nodes, device=device)
+        alpha_t = torch.zeros_like(theta_connectivity_weight)
 
         # These lists store the trajectory over time for later visualization/analysis.
         spike_hist: List[torch.Tensor] = []
@@ -470,7 +480,7 @@ class ObjectRepresentationSNN(nn.Module):
         gamma_hist: List[torch.Tensor] = []
         gate_hist: List[torch.Tensor] = []
         membrane_hist: List[torch.Tensor] = []
-        affinity_hist: List[torch.Tensor] = []
+        theta_connectivity_weight_hist: List[torch.Tensor] = []
         alpha_hist: List[torch.Tensor] = []
 
         interval = max(1, int(self.config.readout_update_interval))
@@ -480,7 +490,7 @@ class ObjectRepresentationSNN(nn.Module):
 
         for step_idx in range(1, self.config.steps + 1):
             # 1. Theta evolves every step using the most recent gamma.
-            theta = self.top_down.update_theta(theta, gamma, affinity, alpha)
+            theta = self.top_down.update_theta(theta, gamma, theta_connectivity_weight, alpha_t)
 
             # 2. Gamma refreshes every scheduled interval.
             if step_idx % interval == 0:
@@ -493,7 +503,7 @@ class ObjectRepresentationSNN(nn.Module):
             if should_update_spike:
                 modulated_gamma = gate * gamma
                 membrane, spikes = self.bottom_up.forward_step(membrane, spikes, modulated_gamma)
-                affinity, alpha = self.top_down.top_down_feedback_function(spikes)
+                theta_connectivity_weight, alpha_t = self.top_down.top_down_feedback_function(spikes)
 
             spike_hist.append(spikes)
             theta_delay_buffer.append(theta)
@@ -508,10 +518,8 @@ class ObjectRepresentationSNN(nn.Module):
                 gate_hist.append(gate)
                 membrane_hist.append(membrane)
                 if return_pairwise_history:
-                    if affinity is not None:
-                        affinity_hist.append(affinity)
-                    if alpha is not None:
-                        alpha_hist.append(alpha)
+                    theta_connectivity_weight_hist.append(theta_connectivity_weight)
+                    alpha_hist.append(alpha_t)
 
         # Stack spikes over time to obtain a [B, T, N] spike trace.
         spike_trace = torch.stack(spike_hist, dim=1)
@@ -532,8 +540,8 @@ class ObjectRepresentationSNN(nn.Module):
                 "spikes": spike_trace,
             }
             if return_pairwise_history:
-                if affinity_hist:
-                    history["affinity"] = torch.stack(affinity_hist, dim=1)
+                if theta_connectivity_weight_hist:
+                    history["theta_connectivity_weight"] = torch.stack(theta_connectivity_weight_hist, dim=1)
                 if alpha_hist:
                     history["alpha"] = torch.stack(alpha_hist, dim=1)
         elif return_spike_trace:

@@ -3,7 +3,7 @@ from __future__ import annotations
 # This file groups reusable building blocks that sit between the low-level
 # dynamics and the full end-to-end model.
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -25,7 +25,7 @@ class GraphVectorKuramotoLayer(nn.Module):
         coupling: float,
         dt: float,
         attraction_strength: float,
-        feedback_affinity_scale: float,
+        feedback_theta_connectivity_weight_scale: float,
         feedback_alpha_scale: float,
         alpha_scale: float,
         fixed_alpha_during_training: bool,
@@ -41,7 +41,7 @@ class GraphVectorKuramotoLayer(nn.Module):
             coupling=coupling,
             dt=dt,
             attraction_strength=attraction_strength,
-            feedback_affinity_scale=feedback_affinity_scale,
+            feedback_theta_connectivity_weight_scale=feedback_theta_connectivity_weight_scale,
             feedback_alpha_scale=feedback_alpha_scale,
             alpha_scale=alpha_scale,
             fixed_alpha_during_training=fixed_alpha_during_training,
@@ -55,11 +55,11 @@ class GraphVectorKuramotoLayer(nn.Module):
         self,
         theta_prev: torch.Tensor,
         gamma_prev: torch.Tensor,
-        affinity: Optional[torch.Tensor],
-        alpha_t: Optional[torch.Tensor],
+        theta_connectivity_weight: torch.Tensor,
+        alpha_t: torch.Tensor,
     ) -> torch.Tensor:
         # Delegate the actual oscillator update to the Kuramoto layer.
-        return self.kuramoto(theta_prev, gamma_prev, affinity, alpha_t)
+        return self.kuramoto(theta_prev, gamma_prev, theta_connectivity_weight, alpha_t)
 
 
 class ObjectReadoutSNN(nn.Module):

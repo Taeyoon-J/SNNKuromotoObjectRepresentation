@@ -82,12 +82,13 @@ class ObjectRepresentationConfig:
 
     # Scale for phase-lag feedback and delay used in the sinusoidal gate.
     alpha_scale: float = 5.0
-    # Keep pairwise phase-lag alpha fixed during training. This lets affinity
-    # feedback change coupling strength without also moving the phase delay.
+    # Keep pairwise phase-lag alpha fixed during training. This lets theta
+    # connectivity feedback change coupling strength without also moving the
+    # phase delay.
     fixed_alpha_during_training: bool = True
     fixed_alpha_value: float = 0.0
     # Extra scales for reducing top-down feedback magnitude.
-    feedback_affinity_scale: float = 0.25
+    feedback_theta_connectivity_weight_scale: float = 0.25
     feedback_alpha_scale: float = 0.25
     delay: int = 2
 
@@ -163,7 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--alpha_scale", type=float, default=5.0)
     parser.add_argument("--fixed_alpha_during_training", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--fixed_alpha_value", type=float, default=0.0)
-    parser.add_argument("--feedback_affinity_scale", type=float, default=0.25)
+    parser.add_argument("--feedback_theta_connectivity_weight_scale", type=float, default=0.25)
     parser.add_argument("--feedback_alpha_scale", type=float, default=0.25)
     parser.add_argument("--delay", type=int, default=2)
     parser.add_argument("--noise_std", type=float, default=0.01)
