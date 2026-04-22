@@ -99,6 +99,7 @@ class ObjectRepresentationConfig:
     # similar in spirit to the TINGTING code organization.
     hidden_dim: int = 16
     # Hidden channels used by the trainable CNN that initializes gamma(0).
+    gamma_initialization: str = "encoder"
     gamma_encoder_hidden: int = 16
     # Optional pre-CNN blur kernel. 1 means use the raw image directly.
     gamma_encoder_blur_kernel: int = 1
@@ -169,6 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delay", type=int, default=2)
     parser.add_argument("--noise_std", type=float, default=0.01)
     parser.add_argument("--hidden_dim", type=int, default=16)
+    parser.add_argument("--gamma_initialization", type=str, default="encoder")
     parser.add_argument("--gamma_encoder_hidden", type=int, default=16)
     parser.add_argument("--gamma_encoder_blur_kernel", type=int, default=1)
     parser.add_argument("--gamma_encoder_skip_scale", type=float, default=0.10)
