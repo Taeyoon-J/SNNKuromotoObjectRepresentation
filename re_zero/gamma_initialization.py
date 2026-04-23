@@ -117,54 +117,50 @@ class EncoderGammaInitialization(GammaInitialization):
             self.gamma_gain.fill_(1.0)
 
 
-class RawGammaInitialization(GammaInitialization):
-    """Use the raw per-pixel input values as gamma features."""
+class FlatAutoencoderGammaInitialization(GammaInitialization):
+    """Encode the whole flattened image, then decode it into gamma(0)."""
+
+    def __init__(self, config) -> None:
+        super().__init__(config)
+        self.image_feature_dim = config.image_height * config.image_width * config.input_channels
+        self.gamma_feature_dim = config.num_oscillators * config.osc_dim
+        self.latent_dim = int(config.gamma_autoencoder_latent_dim)
+
+        self.image_encoder = nn.Sequential(
+            nn.Linear(self.image_feature_dim, self.latent_dim),
+            nn.SiLU(),
+        )
+        self.gamma_decoder = nn.Linear(self.latent_dim, self.gamma_feature_dim)
+        self.gamma_gain = nn.Parameter(torch.ones(1, config.num_oscillators, config.osc_dim))
 
     def initialize(self, x: torch.Tensor) -> torch.Tensor:
-        self.validate_input(x)
-        batch_size, height, width, channels = x.shape
-        raw_features = x.reshape(batch_size, height * width, channels)
-
-        if channels < self.osc_dim:
-            pad_width = self.osc_dim - channels
-            raw_features = F.pad(raw_features, (0, pad_width))
-        elif channels > self.osc_dim:
-            raw_features = raw_features[..., : self.osc_dim]
-
-        gamma_direction = F.normalize(raw_features, dim=-1, eps=1e-6)
+        decoded_input = self.decode_image_features(x) * self.gamma_gain
+        gamma_direction = F.normalize(decoded_input, dim=-1, eps=1e-6)
         return gamma_direction * self.gamma_value_amplitude(x)
 
-
-class ZeroGammaInitialization(GammaInitialization):
-    """Initialize gamma(0) as an all-zero drive."""
-
-    def initialize(self, x: torch.Tensor) -> torch.Tensor:
+    def decode_image_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Map a full flattened image through a latent vector into gamma features."""
         self.validate_input(x)
         batch_size, height, width, _ = x.shape
-        return torch.zeros(
-            batch_size,
-            height * width,
-            self.osc_dim,
-            device=x.device,
-            dtype=x.dtype,
-        )
+        flat_image = x.reshape(batch_size, self.image_feature_dim)
+        latent_features = self.image_encoder(flat_image)
+        decoded_features = self.gamma_decoder(latent_features)
+        return decoded_features.reshape(batch_size, height * width, self.osc_dim)
 
+    def reset_parameters(self) -> None:
+        with torch.no_grad():
+            for module in self.image_encoder:
+                if isinstance(module, nn.Linear):
+                    nn.init.kaiming_normal_(module.weight, nonlinearity="linear")
+                    module.weight.mul_(0.05)
+                    if module.bias is not None:
+                        module.bias.zero_()
 
-class RandomGammaInitialization(GammaInitialization):
-    """Initialize gamma(0) from random unit vectors with input-value amplitude."""
-
-    def initialize(self, x: torch.Tensor) -> torch.Tensor:
-        self.validate_input(x)
-        batch_size, height, width, _ = x.shape
-        random_features = torch.randn(
-            batch_size,
-            height * width,
-            self.osc_dim,
-            device=x.device,
-            dtype=x.dtype,
-        )
-        gamma_direction = F.normalize(random_features, dim=-1, eps=1e-6)
-        return gamma_direction * self.gamma_value_amplitude(x)
+            nn.init.kaiming_normal_(self.gamma_decoder.weight, nonlinearity="linear")
+            self.gamma_decoder.weight.mul_(0.05)
+            if self.gamma_decoder.bias is not None:
+                self.gamma_decoder.bias.zero_()
+            self.gamma_gain.fill_(1.0)
 
 
 def get_gamma_initializer(name: str, config) -> GammaInitialization:
@@ -172,13 +168,9 @@ def get_gamma_initializer(name: str, config) -> GammaInitialization:
     normalized_name = name.lower().strip()
     if normalized_name in {"encoder", "cnn"}:
         return EncoderGammaInitialization(config)
-    if normalized_name in {"raw", "input"}:
-        return RawGammaInitialization(config)
-    if normalized_name in {"zero", "zeros"}:
-        return ZeroGammaInitialization(config)
-    if normalized_name == "random":
-        return RandomGammaInitialization(config)
+    if normalized_name in {"flat_autoencoder", "autoencoder", "mlp"}:
+        return FlatAutoencoderGammaInitialization(config)
     raise ValueError(
         f"Unknown gamma initialization '{name}'. "
-        "Choose one of: encoder, raw, zeros, random."
+        "Choose one of: encoder, flat_autoencoder."
     )

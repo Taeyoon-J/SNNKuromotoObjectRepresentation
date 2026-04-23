@@ -106,6 +106,8 @@ class ObjectRepresentationConfig:
     # Residual raw-image strength in gamma(0). This preserves RGB value cues
     # while the CNN learns richer AKOrN-style stimulus features.
     gamma_encoder_skip_scale: float = 0.10
+    # Latent feature size k for the flat image encoder-decoder initializer.
+    gamma_autoencoder_latent_dim: int = 32
     # Preserve the original per-pixel value as gamma amplitude. Without
     # this, unit-normalizing gamma erases object/background intensity contrast.
     preserve_gamma_value_amplitude: bool = True
@@ -174,6 +176,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gamma_encoder_hidden", type=int, default=16)
     parser.add_argument("--gamma_encoder_blur_kernel", type=int, default=1)
     parser.add_argument("--gamma_encoder_skip_scale", type=float, default=0.10)
+    parser.add_argument("--gamma_autoencoder_latent_dim", type=int, default=32)
     parser.add_argument("--preserve_gamma_value_amplitude", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gamma_value_floor", type=float, default=0.0)
     parser.add_argument("--batch_size", type=int, default=16)
