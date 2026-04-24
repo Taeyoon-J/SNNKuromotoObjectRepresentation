@@ -31,7 +31,7 @@ class ObjectRepresentationSNN(nn.Module):
         1. ReadoutLayer initializes and updates gamma.
         2. KuramotoLayer updates theta.
         3. SinusoidalGate sends oscillator state into the SNN pathway.
-        4. SNNLayer generates spikes and classification logits.
+        4. SNNLayer generates spikes and classifier outputs.
     """
 
     def __init__(self, config: Optional[ObjectRepresentationConfig] = None) -> None:
@@ -74,6 +74,26 @@ class ObjectRepresentationSNN(nn.Module):
             lr=self.config.lr if lr is None else lr,
             weight_decay=self.config.weight_decay if weight_decay is None else weight_decay,
         )
+
+    def object_spike_loss_components(self, classifier_output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Compute unsupervised object-loss components from classifier outputs."""
+        return self.loss_helper.object_spike_loss_components(classifier_output)
+
+    def unsupervised_object_loss_1234(self, classifier_output: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Combine components 1, 2, 3, and 4 plus background suppression."""
+        return self.loss_helper.unsupervised_object_loss_1234(classifier_output)
+
+    def unsupervised_object_loss_124(self, classifier_output: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Combine components 1, 2, and 4 plus background suppression."""
+        return self.loss_helper.unsupervised_object_loss_124(classifier_output)
+
+    def unsupervised_object_loss_123(self, classifier_output: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Combine components 1, 2, and 3 plus background suppression."""
+        return self.loss_helper.unsupervised_object_loss_123(classifier_output)
+
+    def unsupervised_object_loss(self, classifier_output: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Select the configured unsupervised object loss variant."""
+        return self.loss_helper.unsupervised_object_loss(classifier_output)
 
     def forward(
         self,
@@ -162,7 +182,7 @@ class ObjectRepresentationSNN(nn.Module):
                     alpha_hist.append(alpha_t)
 
         spike_trace = torch.stack(spike_hist, dim=1)
-        logits = self.snn.classify(spike_trace)
+        classifier_output = self.snn.classify(spike_trace)
 
         history: Dict[str, torch.Tensor] = {}
         if return_history:
@@ -182,4 +202,4 @@ class ObjectRepresentationSNN(nn.Module):
                     history["alpha"] = torch.stack(alpha_hist, dim=1)
         elif return_spike_trace:
             history = {"spikes": spike_trace}
-        return logits, history if (return_history or return_spike_trace) else {}
+        return classifier_output, history if (return_history or return_spike_trace) else {}
