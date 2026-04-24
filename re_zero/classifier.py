@@ -27,8 +27,8 @@ class SpikeClassifier(nn.Module, ABC):
         self.image_width = image_width
 
     @abstractmethod
-    def classify(self, spike_trace: torch.Tensor):
-        """Map a spike trace [B, T, H*W] to classifier outputs."""
+    def classify(self, spike_trace: torch.Tensor) -> torch.Tensor:
+        """Map a spike trace [B, T, H*W] to object masks [B, O, H, W]."""
 
 
 class PixelPatternEncoder(nn.Module):
@@ -64,7 +64,7 @@ class MeanSpikeClassifier(SpikeClassifier):
         super().__init__(num_pixels, num_classes, classifier_start_step, image_height, image_width)
         self.similarity_threshold = similarity_threshold
 
-    def classify(self, spike_trace: torch.Tensor) -> List[torch.Tensor]:
+    def classify(self, spike_trace: torch.Tensor) -> torch.Tensor:
         start_idx = min(max(self.classifier_start_step - 1, 0), spike_trace.shape[1] - 1)
         average_spikes = spike_trace[:, start_idx:, :].mean(dim=1)
         object_masks: List[torch.Tensor] = []
@@ -80,7 +80,7 @@ class MeanSpikeClassifier(SpikeClassifier):
                     image_width=self.image_width,
                 )
             )
-        return object_masks
+        return stack_object_masks(object_masks, spike_trace)
 
 
 class SpikeFeatureClassifier(SpikeClassifier):
@@ -99,7 +99,7 @@ class SpikeFeatureClassifier(SpikeClassifier):
         self.pattern_encoder = PixelPatternEncoder(feature_dim=8)
         self.similarity_threshold = similarity_threshold
 
-    def classify(self, spike_trace: torch.Tensor) -> List[torch.Tensor]:
+    def classify(self, spike_trace: torch.Tensor) -> torch.Tensor:
         start_idx = min(max(self.classifier_start_step - 1, 0), spike_trace.shape[1] - 1)
         pixel_feature_vectors = self.pattern_encoder(spike_trace, start_idx)
         normalized_features = F.normalize(pixel_feature_vectors, dim=-1, eps=1e-6)
@@ -115,7 +115,8 @@ class SpikeFeatureClassifier(SpikeClassifier):
                     image_width=self.image_width,
                 )
             )
-        return object_masks
+        return stack_object_masks(object_masks, spike_trace)
+
 
 def build_similarity_components_to_masks(
     similarity: torch.Tensor,
@@ -150,6 +151,21 @@ def build_similarity_components_to_masks(
         component_masks.append(mask.view(image_height, image_width))
 
     return torch.stack(component_masks, dim=0)
+
+
+def stack_object_masks(object_masks: List[torch.Tensor], reference: torch.Tensor) -> torch.Tensor:
+    """Pad per-sample object masks into a dense batch tensor [B, O, H, W]."""
+    if not object_masks:
+        return reference.new_zeros((0, 0, 0, 0))
+
+    max_objects = max(mask.shape[0] for mask in object_masks)
+    batch_size = len(object_masks)
+    image_height, image_width = object_masks[0].shape[-2:]
+    padded_masks = reference.new_zeros((batch_size, max_objects, image_height, image_width))
+
+    for batch_idx, masks in enumerate(object_masks):
+        padded_masks[batch_idx, : masks.shape[0]] = masks.to(device=reference.device, dtype=reference.dtype)
+    return padded_masks
 
 
 def get_classifier(

@@ -45,6 +45,9 @@ class ObjectRepresentationConfig:
     # Classifier only pools spike patterns from this time step onward.
     classifier_start_step: int = 60
     classifier_type: str = "mean_spike"
+    # Loss variants used by the standalone loss helper.
+    loss_function: str = "cross_entropy"
+    object_loss_function: str = "1234"
     # Weights for unsupervised object-spike binding losses.
     within_object_similarity_weight: float = 1.0
     between_object_difference_weight: float = 1.0
@@ -148,6 +151,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--spike_update_offset", type=int, default=0)
     parser.add_argument("--classifier_start_step", type=int, default=60)
     parser.add_argument("--classifier_type", type=str, default="mean_spike")
+    parser.add_argument("--loss_function", type=str, default="cross_entropy")
+    parser.add_argument("--object_loss_function", type=str, default="1234")
     parser.add_argument("--within_object_similarity_weight", type=float, default=1.0)
     parser.add_argument("--between_object_difference_weight", type=float, default=1.0)
     parser.add_argument("--object_density_weight", type=float, default=1.0)
