@@ -36,6 +36,9 @@ class ObjectRepresentationConfig:
 
     # Classification target size for the synthetic objects.
     num_classes: int = 5
+    # Supervised and unsupervised loss selections.
+    loss_function: str = "cross_entropy"
+    object_loss_function: str = "1234"
 
     # Number of recurrent time steps to unroll the oscillator-SNN system.
     steps: int = 12
@@ -145,6 +148,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input_channels", type=int, default=3)
     parser.add_argument("--osc_dim", type=int, default=4)
     parser.add_argument("--num_classes", type=int, default=5)
+    parser.add_argument("--loss_function", type=str, default="cross_entropy")
+    parser.add_argument("--object_loss_function", type=str, default="1234")
     parser.add_argument("--steps", type=int, default=12)
     parser.add_argument("--readout_update_interval", type=int, default=5)
     parser.add_argument("--spike_update_offset", type=int, default=0)

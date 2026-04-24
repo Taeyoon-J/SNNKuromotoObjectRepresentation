@@ -66,15 +66,38 @@ class KuramotoLayer(nn.Module):
             theta_connectivity_weight,
             alpha_t,
         ):
-            phase_term = torch.sin(theta_j - theta_i - alpha_chunk.unsqueeze(-1))
+            projection_term = self.compute_projection_term(theta_i, theta_j, alpha_chunk)
             chunks.append(
                 (self.global_coupling_strength / float(num_oscillators)) * torch.sum(
-                    theta_connectivity_weight_chunk.unsqueeze(-1) * phase_term,
+                    theta_connectivity_weight_chunk.unsqueeze(-1) * projection_term,
                     dim=2,
                 )
             )
 
         return torch.cat(chunks, dim=1)
+
+    def compute_projection_term(
+        self,
+        theta_i: torch.Tensor,
+        theta_j: torch.Tensor,
+        alpha_chunk: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Project sender vectors `theta_j` onto receiver directions `theta_i`.
+
+        This replaces elementwise phase-difference sine with a vector similarity
+        interaction: neighbors aligned with `theta_i` contribute more strongly,
+        while orthogonal neighbors contribute little.
+        """
+        theta_i_unit = F.normalize(theta_i, dim=-1, eps=1e-6)
+        projection_scale = torch.sum(theta_j * theta_i_unit, dim=-1, keepdim=True)
+        projected_theta_j = projection_scale * theta_i_unit
+
+        # For the projection-based coupling, keep phase delay fixed for now
+        # instead of consuming the dynamic alpha returned by the SNN pathway.
+        alpha_weight = torch.full_like(alpha_chunk.unsqueeze(-1), float(self.fixed_alpha_value)).cos()
+
+        return alpha_weight * projected_theta_j
 
     def seperate_chunks(
         self,

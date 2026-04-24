@@ -4,19 +4,22 @@ from typing import List
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class SinusoidalGate(nn.Module):
     """
     Bridge from oscillator states to SNN input modulation.
 
-    The gate reads a delayed theta state, converts vector oscillator direction
-    into a scalar phase, and returns a value in [0, 1].
+    The gate reads a delayed theta state, projects each oscillator vector into
+    R^2, converts that 2D vector into a scalar phase angle, and returns a gate
+    in [0, 1].
     """
 
     def __init__(self, delay: int = 2) -> None:
         super().__init__()
         self.delay = delay
+        self.phase_projection = nn.LazyLinear(2)
 
     def forward(self, theta_delayed: torch.Tensor, gamma: torch.Tensor | None = None) -> torch.Tensor:
         return self.sinusoidal_gating_function(theta_delayed, gamma)
@@ -27,15 +30,17 @@ class SinusoidalGate(nn.Module):
         gamma: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
-        Convert delayed phases into a gate in the range [0, 1].
+        Convert delayed vector states into a gate in the range [0, 1].
 
         `gamma` is accepted so this module can later use both theta and gamma
         without changing the outer model API.
         """
-        if theta_delayed.shape[-1] >= 2:
-            theta_phase = torch.atan2(theta_delayed[..., 1:2], theta_delayed[..., 0:1])
-        else:
-            theta_phase = theta_delayed
+        theta_phase_plane = self.phase_projection(theta_delayed)
+        theta_phase_plane = F.normalize(theta_phase_plane, dim=-1, eps=1e-6)
+        theta_phase = torch.atan2(
+            theta_phase_plane[..., 1:2],
+            theta_phase_plane[..., 0:1],
+        )
         return 0.5 * (1.0 + torch.sin(theta_phase))
 
     def build_gate_from_history(
