@@ -56,6 +56,9 @@ class ObjectRepresentationSNN(nn.Module):
             threshold=self.config.threshold,
             recurrent_scale=self.config.recurrent_scale,
             classifier_start_step=self.config.classifier_start_step,
+            classifier_type=self.config.classifier_type,
+            image_height=self.config.image_height,
+            image_width=self.config.image_width,
             input_channels=self.config.input_channels,
         )
 
@@ -253,15 +256,13 @@ class ObjectRepresentationSNN(nn.Module):
         theta = torch.randn(
             batch_size,
             self.num_oscillators,
-            self.config.osc_dim,
             device=device,
         )
-        theta = F.normalize(theta, dim=-1, eps=1e-6)
         gamma = self.readout.initialize_gamma_from_input(x)
         theta_initial = theta
         gamma_initial = gamma
 
-        gate = torch.zeros(batch_size, self.num_oscillators, 1, device=device)
+        sinusoidal_gate = torch.zeros(batch_size, self.num_oscillators, device=device)
         membrane = torch.zeros(batch_size, self.snn.num_pixels, device=device)
         spikes = torch.zeros(batch_size, self.snn.num_pixels, device=device)
 
@@ -292,13 +293,12 @@ class ObjectRepresentationSNN(nn.Module):
 
             if step_idx % interval == 0:
                 gamma = self.readout.gamma_update(theta)
-                gate = self.gate.build_gate_from_history(theta_delay_buffer, theta, gamma)
+                sinusoidal_gate = self.gate.sinusoidal_gating(theta_delay_buffer, theta, gamma)
 
             should_update_spike = (step_idx - spike_update_offset) % interval == 0
             should_update_spike = should_update_spike and step_idx > spike_update_offset
             if should_update_spike:
-                modulated_gamma = gate * gamma
-                membrane, spikes = self.snn.forward_step(membrane, spikes, modulated_gamma)
+                membrane, spikes = self.snn.forward_step(membrane, spikes, sinusoidal_gate, gamma)
                 theta_connectivity_weight, alpha_t = self.top_down_feedback_function(spikes)
 
             spike_hist.append(spikes)
@@ -310,7 +310,7 @@ class ObjectRepresentationSNN(nn.Module):
             if return_history:
                 theta_hist.append(theta)
                 gamma_hist.append(gamma)
-                gate_hist.append(gate)
+                gate_hist.append(sinusoidal_gate)
                 membrane_hist.append(membrane)
                 if return_pairwise_history:
                     theta_connectivity_weight_hist.append(theta_connectivity_weight)

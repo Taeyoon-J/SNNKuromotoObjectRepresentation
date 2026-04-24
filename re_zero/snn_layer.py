@@ -4,7 +4,11 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+try:
+    from .classifier import get_classifier
+except ImportError:
+    from classifier import get_classifier
 
 
 class SNNLayer(nn.Module):
@@ -24,6 +28,9 @@ class SNNLayer(nn.Module):
         threshold: float,
         recurrent_scale: float,
         classifier_start_step: int,
+        classifier_type: str,
+        image_height: int,
+        image_width: int,
         input_channels: int,
     ) -> None:
         super().__init__()
@@ -35,22 +42,24 @@ class SNNLayer(nn.Module):
         self.recurrent_scale = recurrent_scale
         self.classifier_start_step = classifier_start_step
 
-        self.input_weight = nn.Linear(osc_dim, 1, bias=False)
-        with torch.no_grad():
-            desired_weight = torch.tensor(0.5)
-            self.input_weight.weight.fill_(torch.log(torch.expm1(desired_weight)).item())
+        self.membrane_weight = nn.Parameter(torch.full((self.num_pixels,), 0.5))
 
-        self.recurrent_weight = nn.Parameter(torch.randn(self.num_pixels, self.num_pixels) * 0.02)
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(self.num_pixels),
-            nn.Linear(self.num_pixels, num_classes),
+        self.recurrent_weight = nn.Parameter(torch.randn(self.num_pixels) * 0.02)
+        self.classifier = get_classifier(
+            name=classifier_type,
+            num_pixels=self.num_pixels,
+            num_classes=num_classes,
+            classifier_start_step=self.classifier_start_step,
+            image_height=image_height,
+            image_width=image_width,
         )
 
     def forward_step(
         self,
         membrane_prev: torch.Tensor,
         spikes_prev: torch.Tensor,
-        modulated_gamma: torch.Tensor,
+        sinusoidal_gate: torch.Tensor,
+        gamma: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Single SNN update step.
@@ -58,11 +67,12 @@ class SNNLayer(nn.Module):
         Shapes:
             membrane_prev: [B, H*W]
             spikes_prev: [B, H*W]
-            modulated_gamma: [B, H*W, D]
+            sinusoidal_gate: [B, H*W]
+            gamma: [B, H*W]
         """
-        positive_input_weight = F.softplus(self.input_weight.weight)
-        synaptic_drive = F.linear(modulated_gamma, positive_input_weight).squeeze(-1)
-        recurrent_drive = self.recurrent_scale * (spikes_prev @ self.recurrent_weight)
+        sinusoidal_wave = sinusoidal_gate * gamma
+        synaptic_drive = sinusoidal_wave * self.membrane_weight.unsqueeze(0)
+        recurrent_drive = self.recurrent_scale * (spikes_prev * self.recurrent_weight.unsqueeze(0))
 
         membrane = (
             self.membrane_decay * membrane_prev
@@ -73,8 +83,6 @@ class SNNLayer(nn.Module):
         spikes = torch.sigmoid(8.0 * (membrane - self.threshold))
         return membrane, spikes
 
-    def classify(self, spike_trace: torch.Tensor) -> torch.Tensor:
-        """Pool late spike activity and map it to class logits."""
-        start_idx = min(max(self.classifier_start_step - 1, 0), spike_trace.shape[1] - 1)
-        pooled = spike_trace[:, start_idx:, :].mean(dim=1)
-        return self.classifier(pooled)
+    def classify(self, spike_trace: torch.Tensor):
+        """Map a spike trace using the configured classifier."""
+        return self.classifier.classify(spike_trace)

@@ -1,3 +1,4 @@
+from .classifier import SpikeClassifier, get_classifier
 from .gamma_initialization import GammaInitialization, get_gamma_initializer
 from .hyperparameters import ObjectRepresentationConfig, get_default_config
 from .kuramoto_layer import KuramotoLayer

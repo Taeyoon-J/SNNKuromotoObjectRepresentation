@@ -7,12 +7,7 @@ import torch.nn.functional as F
 
 class KuramotoLayer(nn.Module):
     """
-    Graph-aware vector Kuramoto dynamics.
-
-    Each node carries an oscillator vector with dimension `osc_dim`. The state
-    is updated by combining an attraction term toward `gamma_prev` with a
-    pairwise coupling term derived from explicit pixel-pair theta connectivity
-    weights and phase-lag matrices.
+    Graph-aware scalar Kuramoto dynamics.
     """
 
     def __init__(
@@ -47,7 +42,7 @@ class KuramotoLayer(nn.Module):
         drive_term = self.gamma_attraction_strength * (gamma_prev - theta_prev)
         theta_dot = drive_term + coupling_term
         theta_next = theta_prev + self.step_size * theta_dot
-        return F.normalize(theta_next, dim=-1, eps=1e-6)
+        return theta_next
 
     def compute_coupling_term(
         self,
@@ -59,17 +54,17 @@ class KuramotoLayer(nn.Module):
         if float(self.global_coupling_strength) == 0.0:
             return torch.zeros_like(theta_prev)
 
-        _, num_oscillators, _ = theta_prev.shape
+        _, num_oscillators = theta_prev.shape
         chunks = []
         for theta_i, theta_j, theta_connectivity_weight_chunk, alpha_chunk in self.seperate_chunks(
             theta_prev,
             theta_connectivity_weight,
             alpha_t,
         ):
-            phase_term = torch.sin(theta_j - theta_i - alpha_chunk.unsqueeze(-1))
+            phase_term = torch.sin(theta_j - theta_i - alpha_chunk)
             chunks.append(
                 (self.global_coupling_strength / float(num_oscillators)) * torch.sum(
-                    theta_connectivity_weight_chunk.unsqueeze(-1) * phase_term,
+                    theta_connectivity_weight_chunk * phase_term,
                     dim=2,
                 )
             )
@@ -83,7 +78,7 @@ class KuramotoLayer(nn.Module):
         alpha_t: torch.Tensor,
     ):
         """Prepare chunked tensors for coupling computation."""
-        _, num_oscillators, _ = theta_prev.shape
+        _, num_oscillators = theta_prev.shape
         chunk_size = max(1, int(self.coupling_chunk_size))
         theta_j = theta_prev.unsqueeze(1)
 

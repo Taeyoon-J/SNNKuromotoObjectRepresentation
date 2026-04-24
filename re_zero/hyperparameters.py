@@ -28,11 +28,9 @@ class ObjectRepresentationConfig:
     image_width: int = 16
     input_channels: int = 3
 
-    # Oscillator representation size per oscillator node.
-    # We use one oscillator node per image pixel. RGB values are encoded into
-    # the D-dimensional gamma vector instead of becoming separate oscillator
-    # nodes.
-    osc_dim: int = 4
+    # Oscillator state size per pixel node. The current re-zero branch uses a
+    # scalar theta/gamma value at each pixel, so osc_dim stays at 1.
+    osc_dim: int = 1
 
     # Classification target size for the synthetic objects.
     num_classes: int = 5
@@ -46,6 +44,7 @@ class ObjectRepresentationConfig:
     spike_update_offset: int = 0
     # Classifier only pools spike patterns from this time step onward.
     classifier_start_step: int = 60
+    classifier_type: str = "mean_spike"
     # Weights for unsupervised object-spike binding losses.
     within_object_similarity_weight: float = 1.0
     between_object_difference_weight: float = 1.0
@@ -98,7 +97,7 @@ class ObjectRepresentationConfig:
     # Hidden dimension is reserved for future extensions and helps keep the config
     # similar in spirit to the TINGTING code organization.
     hidden_dim: int = 16
-    # Hidden channels used by the trainable CNN that initializes gamma(0).
+    # Hidden channels kept for compatibility with the existing config surface.
     gamma_initialization: str = "encoder"
     gamma_encoder_hidden: int = 16
     # Optional pre-CNN blur kernel. 1 means use the raw image directly.
@@ -108,8 +107,7 @@ class ObjectRepresentationConfig:
     gamma_encoder_skip_scale: float = 0.10
     # Latent feature size k for the flat image encoder-decoder initializer.
     gamma_autoencoder_latent_dim: int = 32
-    # Preserve the original per-pixel value as gamma amplitude. Without
-    # this, unit-normalizing gamma erases object/background intensity contrast.
+    # Preserve the original per-pixel value as gamma amplitude.
     preserve_gamma_value_amplitude: bool = True
     gamma_value_floor: float = 0.0
 
@@ -128,7 +126,7 @@ class ObjectRepresentationConfig:
 
     @property
     def num_oscillators(self) -> int:
-        """Total number of oscillators, one vector oscillator per pixel."""
+        """Total number of oscillators, one scalar oscillator per pixel."""
         return self.image_height * self.image_width
 
 
@@ -143,12 +141,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image_height", type=int, default=16)
     parser.add_argument("--image_width", type=int, default=16)
     parser.add_argument("--input_channels", type=int, default=3)
-    parser.add_argument("--osc_dim", type=int, default=4)
+    parser.add_argument("--osc_dim", type=int, default=1)
     parser.add_argument("--num_classes", type=int, default=5)
     parser.add_argument("--steps", type=int, default=12)
     parser.add_argument("--readout_update_interval", type=int, default=5)
     parser.add_argument("--spike_update_offset", type=int, default=0)
     parser.add_argument("--classifier_start_step", type=int, default=60)
+    parser.add_argument("--classifier_type", type=str, default="mean_spike")
     parser.add_argument("--within_object_similarity_weight", type=float, default=1.0)
     parser.add_argument("--between_object_difference_weight", type=float, default=1.0)
     parser.add_argument("--object_density_weight", type=float, default=1.0)
