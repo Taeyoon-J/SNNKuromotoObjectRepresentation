@@ -26,7 +26,7 @@ class ReadoutLayer(nn.Module):
         self.num_oscillators = config.num_oscillators
         self.osc_dim = config.osc_dim
 
-        self.gamma_readout = nn.Linear(config.osc_dim, config.osc_dim)
+        self.gamma_update_weight = nn.Parameter(torch.eye(config.image_width))
         self.gamma_initializer = get_gamma_initializer(config.gamma_initialization, config)
 
         self.reset_gamma_parameters()
@@ -39,8 +39,22 @@ class ReadoutLayer(nn.Module):
         theta_state shape:
             [B, H*W, D]
         """
-        theta_proj = self.gamma_readout(theta_state)
-        return self.activation_function(torch.abs(theta_proj))
+        batch_size = theta_state.shape[0]
+        theta_grid = theta_state.reshape(
+            batch_size,
+            self.config.image_height,
+            self.config.image_width,
+            self.osc_dim,
+        )
+        theta_proj = torch.matmul(
+            theta_grid.permute(0, 1, 3, 2),
+            self.gamma_update_weight,
+        ).permute(0, 1, 3, 2)
+        return self.activation_function(torch.abs(theta_proj)).reshape(
+            batch_size,
+            self.num_oscillators,
+            self.osc_dim,
+        )
 
     def activation_function(self, x: torch.Tensor) -> torch.Tensor:
         """Nonlinear activation used in the gamma readout stage."""
@@ -66,9 +80,6 @@ class ReadoutLayer(nn.Module):
     def reset_gamma_parameters(self) -> None:
         """Initialize the image encoder and theta-to-gamma readout."""
         with torch.no_grad():
-            self.gamma_readout.weight.zero_()
-            self.gamma_readout.bias.zero_()
-            identity_dim = min(self.gamma_readout.weight.shape)
-            self.gamma_readout.weight[:identity_dim, :identity_dim].copy_(torch.eye(identity_dim))
+            self.gamma_update_weight.copy_(torch.eye(self.config.image_width))
         self.gamma_initializer.reset_parameters()
 

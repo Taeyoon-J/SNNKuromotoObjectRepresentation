@@ -44,7 +44,10 @@ class KuramotoLayer(nn.Module):
         alpha_t: torch.Tensor,
     ) -> torch.Tensor:
         coupling_term = self.compute_coupling_term(theta_prev, theta_connectivity_weight, alpha_t)
-        drive_term = self.gamma_attraction_strength * (gamma_prev - theta_prev)
+        drive_term = self.gamma_attraction_strength * self.compute_drive_projection_term(
+            theta_prev,
+            gamma_prev,
+        )
         theta_dot = drive_term + coupling_term
         theta_next = theta_prev + self.step_size * theta_dot
         return F.normalize(theta_next, dim=-1, eps=1e-6)
@@ -98,6 +101,16 @@ class KuramotoLayer(nn.Module):
         alpha_weight = torch.full_like(alpha_chunk.unsqueeze(-1), float(self.fixed_alpha_value)).cos()
 
         return alpha_weight * projected_theta_j
+
+    def compute_drive_projection_term(
+        self,
+        theta_prev: torch.Tensor,
+        gamma_prev: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project each gamma vector onto its matching theta direction."""
+        theta_unit = F.normalize(theta_prev, dim=-1, eps=1e-6)
+        projection_scale = torch.sum(gamma_prev * theta_unit, dim=-1, keepdim=True)
+        return projection_scale * theta_unit
 
     def seperate_chunks(
         self,

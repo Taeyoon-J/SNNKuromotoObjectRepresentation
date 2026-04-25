@@ -24,6 +24,15 @@ class SinusoidalGate(nn.Module):
     def forward(self, theta_delayed: torch.Tensor, gamma: torch.Tensor | None = None) -> torch.Tensor:
         return self.sinusoidal_gating_function(theta_delayed, gamma)
 
+    def sinusoidal_gating(
+        self,
+        theta_history: List[torch.Tensor],
+        theta_current: torch.Tensor,
+        gamma: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Build the sinusoidal gate from delayed theta history."""
+        return self.build_gate_from_history(theta_history, theta_current, gamma)
+
     def sinusoidal_gating_function(
         self,
         theta_delayed: torch.Tensor,

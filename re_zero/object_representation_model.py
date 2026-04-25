@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -32,7 +32,7 @@ class ObjectRepresentationSNN(nn.Module):
         1. ReadoutLayer initializes and updates gamma.
         2. KuramotoLayer updates theta.
         3. SinusoidalGate sends oscillator state into the SNN pathway.
-        4. SNNLayer generates spikes and classification logits.
+        4. SNNLayer generates spikes and classifier outputs.
     """
 
     def __init__(self, config: Optional[ObjectRepresentationConfig] = None) -> None:
@@ -41,8 +41,6 @@ class ObjectRepresentationSNN(nn.Module):
         self.num_oscillators = self.config.num_oscillators
 
         self.readout = ReadoutLayer(self.config)
-        self.losses = ObjectRepresentationLoss(self.config)
-        self.top_down_feedback = TopDownFeedback(self.config)
         self.kuramoto = KuramotoLayer(
             num_oscillators=self.num_oscillators,
             osc_dim=self.config.osc_dim,
@@ -62,48 +60,13 @@ class ObjectRepresentationSNN(nn.Module):
             threshold=self.config.threshold,
             recurrent_scale=self.config.recurrent_scale,
             classifier_start_step=self.config.classifier_start_step,
+            classifier_type=self.config.classifier_type,
+            image_height=self.config.image_height,
+            image_width=self.config.image_width,
             input_channels=self.config.input_channels,
         )
-
-    def loss_function(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """Standard supervised classification loss."""
-        return self.losses.classification_loss(logits, labels)
-
-    def top_down_feedback_function(self, spikes: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Delegate pairwise feedback construction to the dedicated helper."""
-        return self.top_down_feedback.top_down_feedback_function(spikes, training=self.training)
-
-    def _late_spike_window(self, spike_trace: torch.Tensor) -> torch.Tensor:
-        """Return the spike window used by the unsupervised object losses."""
-        return self.losses._late_spike_window(spike_trace)
-
-    def _prepare_object_masks(self, object_masks: torch.Tensor, spike_trace: torch.Tensor) -> torch.Tensor:
-        """Convert pixel-level object masks into flattened node-level masks."""
-        return self.losses._prepare_object_masks(object_masks, spike_trace)
-
-    def _object_activity(self, spike_trace: torch.Tensor, node_masks: torch.Tensor) -> torch.Tensor:
-        """Average spike activity inside each object mask, shape [B, T, O]."""
-        return self.losses._object_activity(spike_trace, node_masks)
-
-    def object_spike_loss_components(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Compute reusable unsupervised object-spike loss components."""
-        return self.losses.object_spike_loss_components(spike_trace, object_masks)
-
-    def unsupervised_object_loss_1234(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> torch.Tensor:
-        """Loss using components 1, 2, 3, and 4 plus background suppression."""
-        return self.losses.unsupervised_object_loss_1234(spike_trace, object_masks)
-
-    def unsupervised_object_loss_124(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> torch.Tensor:
-        """Loss using components 1, 2, and 4 plus background suppression."""
-        return self.losses.unsupervised_object_loss_124(spike_trace, object_masks)
-
-    def unsupervised_object_loss_123(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> torch.Tensor:
-        """Loss using components 1, 2, and 3 plus background suppression."""
-        return self.losses.unsupervised_object_loss_123(spike_trace, object_masks)
-
-    def unsupervised_object_loss(self, spike_trace: torch.Tensor, object_masks: torch.Tensor) -> torch.Tensor:
-        """Loss selected by `config.object_loss_function`."""
-        return self.losses.unsupervised_object_loss(spike_trace, object_masks)
+        self.loss_helper = ObjectRepresentationLoss(self.config)
+        self.top_down_feedback = TopDownFeedback(self.config)
 
     def build_adam_optimizer(self, lr: Optional[float] = None, weight_decay: Optional[float] = None):
         """Create an Adam optimizer using either custom values or config defaults."""
@@ -112,6 +75,26 @@ class ObjectRepresentationSNN(nn.Module):
             lr=self.config.lr if lr is None else lr,
             weight_decay=self.config.weight_decay if weight_decay is None else weight_decay,
         )
+
+    def object_spike_loss_components(self, classifier_output: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Compute unsupervised object-loss components from classifier outputs."""
+        return self.loss_helper.object_spike_loss_components(classifier_output)
+
+    def unsupervised_object_loss_1234(self, classifier_output: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Combine components 1, 2, 3, and 4 plus background suppression."""
+        return self.loss_helper.unsupervised_object_loss_1234(classifier_output)
+
+    def unsupervised_object_loss_124(self, classifier_output: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Combine components 1, 2, and 4 plus background suppression."""
+        return self.loss_helper.unsupervised_object_loss_124(classifier_output)
+
+    def unsupervised_object_loss_123(self, classifier_output: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Combine components 1, 2, and 3 plus background suppression."""
+        return self.loss_helper.unsupervised_object_loss_123(classifier_output)
+
+    def unsupervised_object_loss(self, classifier_output: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Select the configured unsupervised object loss variant."""
+        return self.loss_helper.unsupervised_object_loss(classifier_output)
 
     def forward(
         self,
@@ -144,7 +127,7 @@ class ObjectRepresentationSNN(nn.Module):
         theta_initial = theta
         gamma_initial = gamma
 
-        gate = torch.zeros(batch_size, self.num_oscillators, 1, device=device)
+        sinusoidal_gate = torch.zeros(batch_size, self.num_oscillators, 1, device=device)
         membrane = torch.zeros(batch_size, self.snn.num_pixels, device=device)
         spikes = torch.zeros(batch_size, self.snn.num_pixels, device=device)
 
@@ -175,14 +158,16 @@ class ObjectRepresentationSNN(nn.Module):
 
             if step_idx % interval == 0:
                 gamma = self.readout.gamma_update(theta)
-                gate = self.gate.build_gate_from_history(theta_delay_buffer, theta, gamma)
+                sinusoidal_gate = self.gate.sinusoidal_gating(theta_delay_buffer, theta, gamma)
 
             should_update_spike = (step_idx - spike_update_offset) % interval == 0
             should_update_spike = should_update_spike and step_idx > spike_update_offset
             if should_update_spike:
-                modulated_gamma = gate * gamma
-                membrane, spikes = self.snn.forward_step(membrane, spikes, modulated_gamma)
-                theta_connectivity_weight, alpha_t = self.top_down_feedback_function(spikes)
+                membrane, spikes = self.snn.forward_step(membrane, spikes, sinusoidal_gate, gamma)
+                theta_connectivity_weight, alpha_t = self.top_down_feedback.top_down_feedback_function(
+                    spikes,
+                    self.training,
+                )
 
             spike_hist.append(spikes)
             theta_delay_buffer.append(theta)
@@ -193,14 +178,14 @@ class ObjectRepresentationSNN(nn.Module):
             if return_history:
                 theta_hist.append(theta)
                 gamma_hist.append(gamma)
-                gate_hist.append(gate)
+                gate_hist.append(sinusoidal_gate)
                 membrane_hist.append(membrane)
                 if return_pairwise_history:
                     theta_connectivity_weight_hist.append(theta_connectivity_weight)
                     alpha_hist.append(alpha_t)
 
         spike_trace = torch.stack(spike_hist, dim=1)
-        logits = self.snn.classify(spike_trace)
+        classifier_output = self.snn.classify(spike_trace)
 
         history: Dict[str, torch.Tensor] = {}
         if return_history:
@@ -220,4 +205,4 @@ class ObjectRepresentationSNN(nn.Module):
                     history["alpha"] = torch.stack(alpha_hist, dim=1)
         elif return_spike_trace:
             history = {"spikes": spike_trace}
-        return logits, history if (return_history or return_spike_trace) else {}
+        return classifier_output, history if (return_history or return_spike_trace) else {}
