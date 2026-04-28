@@ -42,7 +42,9 @@ class ReadoutLayer(nn.Module):
         batch_size = theta_state.shape[0]
         theta_grid = theta_state.reshape(batch_size, self.config.image_height, self.config.image_width)
         theta_proj = torch.matmul(theta_grid, self.gamma_update_weight)
-        return self.activation_function(torch.abs(theta_proj)).reshape(batch_size, self.num_oscillators)
+        gamma_update = self.activation_function(torch.abs(theta_proj))
+        gamma_update = self.config.gamma_update_scale * gamma_update
+        return gamma_update.reshape(batch_size, self.num_oscillators)
 
     def activation_function(self, x: torch.Tensor) -> torch.Tensor:
         """Nonlinear activation used in the gamma readout stage."""

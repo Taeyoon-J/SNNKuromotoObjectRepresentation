@@ -124,11 +124,11 @@ class EncoderInitialization(GammaInitialization):
 def get_gamma_initializer(name: str, config) -> GammaInitialization:
     """Create a gamma initializer from a config keyword."""
     normalized_name = name.lower().strip()
-    if normalized_name in {"encoder", "cnn"}:
+    if normalized_name in {"channel", "channel_compress", "pixel", "cnn"}:
         return ChannelCompressInitialization(config)
-    if normalized_name in {"flat_autoencoder", "autoencoder", "mlp"}:
+    if normalized_name in {"encoder", "flat_autoencoder", "autoencoder", "mlp"}:
         return EncoderInitialization(config)
     raise ValueError(
         f"Unknown gamma initialization '{name}'. "
-        "Choose one of: encoder, flat_autoencoder."
+        "Choose one of: encoder, channel_compress."
     )

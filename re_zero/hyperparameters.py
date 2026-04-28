@@ -110,6 +110,8 @@ class ObjectRepresentationConfig:
     gamma_encoder_skip_scale: float = 0.10
     # Latent feature size k for the flat image encoder-decoder initializer.
     gamma_autoencoder_latent_dim: int = 32
+    # Scale applied when reading gamma(t) back from theta(t).
+    gamma_update_scale: float = 1.0
     # Preserve the original per-pixel value as gamma amplitude.
     preserve_gamma_value_amplitude: bool = True
     gamma_value_floor: float = 0.0
@@ -181,6 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gamma_encoder_blur_kernel", type=int, default=1)
     parser.add_argument("--gamma_encoder_skip_scale", type=float, default=0.10)
     parser.add_argument("--gamma_autoencoder_latent_dim", type=int, default=32)
+    parser.add_argument("--gamma_update_scale", type=float, default=1.0)
     parser.add_argument("--preserve_gamma_value_amplitude", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gamma_value_floor", type=float, default=0.0)
     parser.add_argument("--batch_size", type=int, default=16)
