@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class GammaInitialization(nn.Module, ABC):
@@ -121,6 +122,68 @@ class EncoderInitialization(GammaInitialization):
             self.gamma_gain.fill_(1.0)
 
 
+class RGBNormalize(nn.Module):
+    """Normalize NCHW RGB images with fixed channel-wise statistics."""
+
+    def __init__(self, mean, std) -> None:
+        super().__init__()
+        self.register_buffer("mean", torch.tensor(mean, dtype=torch.float32).view(1, -1, 1, 1))
+        self.register_buffer("std", torch.tensor(std, dtype=torch.float32).view(1, -1, 1, 1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x - self.mean.to(dtype=x.dtype)) / self.std.to(dtype=x.dtype)
+
+
+class PatchConvInitialization(GammaInitialization):
+    """Initialize gamma(0) from scalar patch features, then expand back to pixels."""
+
+    def __init__(self, config) -> None:
+        super().__init__(config)
+        self.patch_size = int(getattr(config, "gamma_patch_size", 2))
+        if self.patch_size < 1:
+            raise ValueError(f"gamma_patch_size must be >= 1, got {self.patch_size}")
+
+        self.patchify = nn.Sequential(
+            RGBNormalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            nn.Conv2d(
+                config.input_channels,
+                1,
+                kernel_size=self.patch_size,
+                stride=self.patch_size,
+                padding=0,
+            ),
+        )
+        self.gamma_gain = nn.Parameter(torch.ones(1, config.num_oscillators))
+
+    def initialize(self, x: torch.Tensor) -> torch.Tensor:
+        patch_features = self.encode_patch_features(x)
+        return torch.tanh(patch_features * self.gamma_gain) * self.gamma_value_amplitude(x)
+
+    def encode_patch_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Map image patches to scalar features and nearest-upsample to [B, H*W]."""
+        self.validate_input(x)
+        batch_size, height, width, _ = x.shape
+        if height % self.patch_size != 0 or width % self.patch_size != 0:
+            raise ValueError(
+                f"Patch size {self.patch_size} must evenly divide input size "
+                f"{height}x{width} for patch-conv gamma initialization."
+            )
+
+        nchw_image = x.permute(0, 3, 1, 2).contiguous()
+        patch_grid = self.patchify(nchw_image)
+        pixel_grid = F.interpolate(patch_grid, size=(height, width), mode="nearest")
+        return pixel_grid.reshape(batch_size, height * width)
+
+    def reset_parameters(self) -> None:
+        conv = self.patchify[1]
+        with torch.no_grad():
+            nn.init.kaiming_normal_(conv.weight, nonlinearity="linear")
+            conv.weight.mul_(0.05)
+            if conv.bias is not None:
+                conv.bias.zero_()
+            self.gamma_gain.fill_(1.0)
+
+
 def get_gamma_initializer(name: str, config) -> GammaInitialization:
     """Create a gamma initializer from a config keyword."""
     normalized_name = name.lower().strip()
@@ -128,7 +191,9 @@ def get_gamma_initializer(name: str, config) -> GammaInitialization:
         return ChannelCompressInitialization(config)
     if normalized_name in {"encoder", "flat_autoencoder", "autoencoder", "mlp"}:
         return EncoderInitialization(config)
+    if normalized_name in {"patch_conv", "patchify", "akorn_patch"}:
+        return PatchConvInitialization(config)
     raise ValueError(
         f"Unknown gamma initialization '{name}'. "
-        "Choose one of: encoder, channel_compress."
+        "Choose one of: encoder, channel_compress, patch_conv."
     )
