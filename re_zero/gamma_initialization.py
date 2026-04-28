@@ -137,6 +137,9 @@ class RGBNormalize(nn.Module):
 class PatchConvInitialization(GammaInitialization):
     """Initialize gamma(0) from scalar patch features, then expand back to pixels."""
 
+    PATCH_CONTRAST_SCALE = 3.0
+    PATCH_INIT_SCALE = 0.15
+
     def __init__(self, config) -> None:
         super().__init__(config)
         self.patch_size = int(getattr(config, "gamma_patch_size", 2))
@@ -157,6 +160,7 @@ class PatchConvInitialization(GammaInitialization):
 
     def initialize(self, x: torch.Tensor) -> torch.Tensor:
         patch_features = self.encode_patch_features(x)
+        patch_features = self.PATCH_CONTRAST_SCALE * patch_features
         return torch.tanh(patch_features * self.gamma_gain) * self.gamma_value_amplitude(x)
 
     def encode_patch_features(self, x: torch.Tensor) -> torch.Tensor:
@@ -178,7 +182,7 @@ class PatchConvInitialization(GammaInitialization):
         conv = self.patchify[1]
         with torch.no_grad():
             nn.init.kaiming_normal_(conv.weight, nonlinearity="linear")
-            conv.weight.mul_(0.05)
+            conv.weight.mul_(self.PATCH_INIT_SCALE)
             if conv.bias is not None:
                 conv.bias.zero_()
             self.gamma_gain.fill_(1.0)

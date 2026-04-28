@@ -29,6 +29,7 @@ class SNNLayer(nn.Module):
         recurrent_scale: float,
         classifier_start_step: int,
         classifier_type: str,
+        classifier_similarity_threshold: float,
         image_height: int,
         image_width: int,
         input_channels: int,
@@ -52,6 +53,7 @@ class SNNLayer(nn.Module):
             classifier_start_step=self.classifier_start_step,
             image_height=image_height,
             image_width=image_width,
+            similarity_threshold=classifier_similarity_threshold,
         )
 
     def forward_step(

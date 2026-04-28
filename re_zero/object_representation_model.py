@@ -61,6 +61,7 @@ class ObjectRepresentationSNN(nn.Module):
             recurrent_scale=self.config.recurrent_scale,
             classifier_start_step=self.config.classifier_start_step,
             classifier_type=self.config.classifier_type,
+            classifier_similarity_threshold=self.config.classifier_similarity_threshold,
             image_height=self.config.image_height,
             image_width=self.config.image_width,
             input_channels=self.config.input_channels,

@@ -45,6 +45,7 @@ class ObjectRepresentationConfig:
     # Classifier only pools spike patterns from this time step onward.
     classifier_start_step: int = 60
     classifier_type: str = "mean_spike"
+    classifier_similarity_threshold: float = 0.60
     # Loss variants used by the standalone loss helper.
     loss_function: str = "cross_entropy"
     object_loss_function: str = "1234"
@@ -110,6 +111,8 @@ class ObjectRepresentationConfig:
     gamma_encoder_skip_scale: float = 0.10
     # Latent feature size k for the flat image encoder-decoder initializer.
     gamma_autoencoder_latent_dim: int = 32
+    # Patch size for patch-conv gamma initialization.
+    gamma_patch_size: int = 2
     # Scale applied when reading gamma(t) back from theta(t).
     gamma_update_scale: float = 1.0
     # Preserve the original per-pixel value as gamma amplitude.
@@ -153,6 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--spike_update_offset", type=int, default=0)
     parser.add_argument("--classifier_start_step", type=int, default=60)
     parser.add_argument("--classifier_type", type=str, default="mean_spike")
+    parser.add_argument("--classifier_similarity_threshold", type=float, default=0.60)
     parser.add_argument("--loss_function", type=str, default="cross_entropy")
     parser.add_argument("--object_loss_function", type=str, default="1234")
     parser.add_argument("--within_object_similarity_weight", type=float, default=1.0)
@@ -183,6 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gamma_encoder_blur_kernel", type=int, default=1)
     parser.add_argument("--gamma_encoder_skip_scale", type=float, default=0.10)
     parser.add_argument("--gamma_autoencoder_latent_dim", type=int, default=32)
+    parser.add_argument("--gamma_patch_size", type=int, default=2)
     parser.add_argument("--gamma_update_scale", type=float, default=1.0)
     parser.add_argument("--preserve_gamma_value_amplitude", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gamma_value_floor", type=float, default=0.0)

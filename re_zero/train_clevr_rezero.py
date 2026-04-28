@@ -40,6 +40,7 @@ def build_config(args: argparse.Namespace) -> ObjectRepresentationConfig:
         spike_update_offset=args.spike_update_offset,
         classifier_start_step=args.classifier_start_step,
         classifier_type=args.classifier_type,
+        classifier_similarity_threshold=args.classifier_similarity_threshold,
         object_loss_function=args.object_loss_function,
         within_object_similarity_weight=args.within_object_similarity_weight,
         between_object_difference_weight=args.between_object_difference_weight,
@@ -66,6 +67,7 @@ def build_config(args: argparse.Namespace) -> ObjectRepresentationConfig:
         gamma_encoder_blur_kernel=args.gamma_encoder_blur_kernel,
         gamma_encoder_skip_scale=args.gamma_encoder_skip_scale,
         gamma_autoencoder_latent_dim=args.gamma_autoencoder_latent_dim,
+        gamma_patch_size=args.gamma_patch_size,
         gamma_update_scale=args.gamma_update_scale,
         preserve_gamma_value_amplitude=args.preserve_gamma_value_amplitude,
         gamma_value_floor=args.gamma_value_floor,
@@ -409,6 +411,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spike_update_offset", type=int, default=0)
     parser.add_argument("--classifier_start_step", type=int, default=60)
     parser.add_argument("--classifier_type", type=str, default="mean_spike", choices=["mean_spike", "spike_feature"])
+    parser.add_argument("--classifier_similarity_threshold", type=float, default=0.60)
     parser.add_argument("--object_loss_function", type=str, default="1234", choices=["1234", "123", "124"])
     parser.add_argument("--osc_dim", type=int, default=1)
     parser.add_argument("--step_size", type=float, default=0.15)
@@ -436,6 +439,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gamma_encoder_blur_kernel", type=int, default=1)
     parser.add_argument("--gamma_encoder_skip_scale", type=float, default=0.10)
     parser.add_argument("--gamma_autoencoder_latent_dim", type=int, default=32)
+    parser.add_argument("--gamma_patch_size", type=int, default=2)
     parser.add_argument("--gamma_update_scale", type=float, default=1.0)
     parser.add_argument("--preserve_gamma_value_amplitude", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gamma_value_floor", type=float, default=0.0)

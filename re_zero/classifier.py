@@ -59,7 +59,7 @@ class MeanSpikeClassifier(SpikeClassifier):
         classifier_start_step: int,
         image_height: int,
         image_width: int,
-        similarity_threshold: float = 0.90,
+        similarity_threshold: float = 0.60,
     ) -> None:
         super().__init__(num_pixels, num_classes, classifier_start_step, image_height, image_width)
         self.similarity_threshold = similarity_threshold
@@ -91,7 +91,7 @@ class SpikeFeatureClassifier(SpikeClassifier):
         classifier_start_step: int,
         image_height: int,
         image_width: int,
-        similarity_threshold: float = 0.90,
+        similarity_threshold: float = 0.60,
     ) -> None:
         super().__init__(num_pixels, num_classes, classifier_start_step, image_height, image_width)
         self.pattern_encoder = PixelPatternEncoder(feature_dim=8)
@@ -158,11 +158,19 @@ def get_classifier(
     classifier_start_step: int,
     image_height: int,
     image_width: int,
+    similarity_threshold: float = 0.60,
 ) -> SpikeClassifier:
     """Create a spike classifier from a config keyword."""
     normalized_name = name.lower().strip()
     if normalized_name in {"mean_spike", "average", "default"}:
-        return MeanSpikeClassifier(num_pixels, num_classes, classifier_start_step, image_height, image_width)
+        return MeanSpikeClassifier(
+            num_pixels,
+            num_classes,
+            classifier_start_step,
+            image_height,
+            image_width,
+            similarity_threshold=similarity_threshold,
+        )
     if normalized_name in {"spike_feature", "feature", "objects"}:
         return SpikeFeatureClassifier(
             num_pixels,
@@ -170,6 +178,7 @@ def get_classifier(
             classifier_start_step,
             image_height,
             image_width,
+            similarity_threshold=similarity_threshold,
         )
     raise ValueError(
         f"Unknown classifier '{name}'. "

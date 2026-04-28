@@ -35,6 +35,7 @@ def build_config(args: argparse.Namespace) -> ObjectRepresentationConfig:
         spike_update_offset=args.spike_update_offset,
         classifier_start_step=args.classifier_start_step,
         classifier_type=args.classifier_type,
+        classifier_similarity_threshold=args.classifier_similarity_threshold,
         step_size=args.step_size,
         global_coupling_strength=args.global_coupling_strength,
         coupling_chunk_size=args.coupling_chunk_size,
@@ -50,6 +51,7 @@ def build_config(args: argparse.Namespace) -> ObjectRepresentationConfig:
         delay=args.delay,
         gamma_initialization=args.gamma_initialization,
         gamma_autoencoder_latent_dim=args.gamma_autoencoder_latent_dim,
+        gamma_patch_size=args.gamma_patch_size,
         gamma_update_scale=args.gamma_update_scale,
         preserve_gamma_value_amplitude=args.preserve_gamma_value_amplitude,
         gamma_value_floor=args.gamma_value_floor,
@@ -255,8 +257,10 @@ def run_diagnostic(model: ObjectRepresentationSNN, x: torch.Tensor, args: argpar
     gate = torch.zeros(batch_size, model.num_oscillators, device=device)
     membrane = torch.zeros(batch_size, model.snn.num_pixels, device=device)
     spikes = torch.zeros(batch_size, model.snn.num_pixels, device=device)
-    aij = torch.zeros(batch_size, model.num_oscillators, model.num_oscillators, device=device)
-    alpha = torch.zeros_like(aij)
+    feedback_aij = torch.zeros(batch_size, model.num_oscillators, model.num_oscillators, device=device)
+    feedback_alpha = torch.zeros_like(feedback_aij)
+    kuramoto_aij = torch.zeros_like(feedback_aij)
+    kuramoto_alpha = torch.zeros_like(feedback_alpha)
 
     theta_history: List[torch.Tensor] = []
     gamma_history: List[torch.Tensor] = []
@@ -269,7 +273,7 @@ def run_diagnostic(model: ObjectRepresentationSNN, x: torch.Tensor, args: argpar
 
     for step_idx in range(1, config.steps + 1):
         model.kuramoto.gamma_attraction_strength = gamma_attraction_for_step(step_idx, args)
-        theta = model.kuramoto(theta, gamma, aij, alpha)
+        theta = model.kuramoto(theta, gamma, kuramoto_aij, kuramoto_alpha)
         gamma_updated = False
         feedback_updated = False
 
@@ -282,7 +286,9 @@ def run_diagnostic(model: ObjectRepresentationSNN, x: torch.Tensor, args: argpar
         should_update_spike = should_update_spike and step_idx > spike_update_offset
         if should_update_spike:
             membrane, spikes = model.snn.forward_step(membrane, spikes, gate, gamma)
-            aij, alpha = build_feedback_tensors(model, spikes, args)
+            feedback_aij, feedback_alpha = build_feedback_tensors(model, spikes, args)
+            if args.feedback_affects_kuramoto:
+                kuramoto_aij, kuramoto_alpha = feedback_aij, feedback_alpha
             feedback_updated = True
 
         theta_history.append(theta.detach().cpu())
@@ -297,13 +303,14 @@ def run_diagnostic(model: ObjectRepresentationSNN, x: torch.Tensor, args: argpar
             "step": step_idx,
             "gamma_updated": float(gamma_updated),
             "feedback_updated": float(feedback_updated),
+            "feedback_affects_kuramoto": float(args.feedback_affects_kuramoto),
             "kuramoto_coupling_strength": float(model.kuramoto.global_coupling_strength),
             "gamma_attraction_strength": float(model.kuramoto.gamma_attraction_strength),
             **scalar_alignment(theta, gamma),
             "spike_mean": float(spikes.mean().item()),
             "spike_max": float(spikes.max().item()),
-            **tensor_stats("aij", aij),
-            **tensor_stats("alpha", alpha),
+            **tensor_stats("aij", feedback_aij),
+            **tensor_stats("alpha", feedback_alpha),
         }
         metrics.append(row)
 
@@ -458,7 +465,7 @@ def write_metrics(
                 "fixed_affinity_value": args.fixed_affinity_value,
                 "fixed_alpha_value": args.fixed_alpha_value,
                 "aij_alpha_computed": True,
-                "aij_alpha_affects_kuramoto": config.global_coupling_strength != 0.0,
+                "aij_alpha_affects_kuramoto": bool(args.feedback_affects_kuramoto),
                 "gamma_encoder_pretrained": bool(pretrain_losses),
                 "gamma_encoder_pretrain_losses": pretrain_losses,
                 "config": config.__dict__,
@@ -479,6 +486,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spike_update_offset", type=int, default=0)
     parser.add_argument("--classifier_start_step", type=int, default=10)
     parser.add_argument("--classifier_type", type=str, default="mean_spike")
+    parser.add_argument("--classifier_similarity_threshold", type=float, default=0.60)
     parser.add_argument("--sample_idx", type=int, default=0)
     parser.add_argument("--split", type=str, default="train", choices=["train", "test", "all"])
     parser.add_argument("--train_fraction", type=float, default=0.8)
@@ -500,6 +508,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=0.6)
     parser.add_argument("--alpha_scale", type=float, default=5.0)
     parser.add_argument("--feedback_mode", type=str, default="fixed_affinity", choices=["fixed_affinity", "spike_feedback"])
+    parser.add_argument("--feedback_affects_kuramoto", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--fixed_affinity_value", type=float, default=1.0)
     parser.add_argument("--fixed_alpha_value", type=float, default=0.0)
     parser.add_argument("--feedback_theta_connectivity_weight_scale", type=float, default=0.25)
@@ -507,6 +516,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delay", type=int, default=2)
     parser.add_argument("--gamma_initialization", type=str, default="encoder")
     parser.add_argument("--gamma_autoencoder_latent_dim", type=int, default=32)
+    parser.add_argument("--gamma_patch_size", type=int, default=2)
     parser.add_argument("--gamma_update_scale", type=float, default=1.0)
     parser.add_argument("--pretrain_gamma_encoder", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--pretrain_gamma_epochs", type=int, default=5)
@@ -550,12 +560,13 @@ def main() -> None:
         print(f"gamma_attraction_values: {args.gamma_attraction_values}")
         print(f"gamma_attraction_boundaries: {args.gamma_attraction_boundaries}")
     print(f"feedback_mode: {args.feedback_mode}")
+    print(f"feedback_affects_kuramoto: {args.feedback_affects_kuramoto}")
     print(f"fixed_affinity_value: {args.fixed_affinity_value}")
     print(f"fixed_alpha_value: {args.fixed_alpha_value}")
     print(f"gamma_initialization: {config.gamma_initialization}")
     print(f"gamma_encoder_pretrained: {bool(pretrain_losses)}")
     print("Aij/alpha computed: yes")
-    print(f"Aij/alpha affect Kuramoto: {config.global_coupling_strength != 0.0}")
+    print(f"Aij/alpha affect Kuramoto: {bool(args.feedback_affects_kuramoto)}")
     print(f"output_dir: {output_dir}")
     print("final_metrics:")
     for key, value in metrics[-1].items():
